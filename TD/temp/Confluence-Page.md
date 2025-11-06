@@ -1,163 +1,250 @@
-Perfect — that’s an excellent addition, and it ties together your entire lineage and observability story across the **file → ADLS → Kafka → Delta** path.
-
-Below is a **Confluence-ready explanation** (no code, just clear technical detail) you can paste directly into your document under a section like **“Tracing and Correlation”** or **“Observability and Lineage Tracking.”**
-
----
-
-## **Tracing and Correlation (OpenTelemetry Integration)**
-
-The **Custom Spring-Batch SDK** is fully instrumented with **OpenTelemetry (OTel)**, enabling complete traceability of data as it moves from its source file all the way to its final destination in **Kafka** and later in **Databricks Delta**.
-
-This tracing capability provides a **single, connected view** of the entire ingestion journey — from when a file first appears to when its records are published to a Kafka topic.
+Perfect — this photo is an excellent summary of the pivot you’re describing, and it aligns perfectly with the “API-first ingestion/orchestration” architecture we outlined earlier.  
+Below is a **Confluence-ready document** you can directly paste (or adapt) into your team’s space — structured exactly the way teams expect internal design proposals to look.
 
 ---
 
-### **1. File-Level Tracing**
+# 🧩 API-First Data Ingestion Platform (Unified Batch + Streaming)
 
-- Each incoming file is automatically assigned a **Trace ID** when the SDK first detects it (during file discovery or validation).
-    
-- This trace ID represents the **root span** of the ingestion flow.
-    
-- All subsequent actions on that file — validation, upload to ADLS, and final status updates — are recorded as **child spans** under the same trace context.
-    
+## 1️⃣ Background & Motivation
 
-This lets users visualize, for any given trace, how long it took:
+Previously, our ingestion framework was being built as a **custom Spring Boot SDK** — offering annotations, base classes, and lifecycle hooks for ingestion and publishing.  
+While this worked well inside Spring Boot, it also made adoption tightly coupled to the Java ecosystem.
 
-- to discover the file,
-    
-- to validate and enrich it,
-    
-- to upload it to ADLS, and
-    
-- to mark it ready for downstream processing.
-    
+As we began considering broader adoption (e.g., **Python-based** analytics apps, **.NET** micro-services, and **non-Spring** workloads), it became clear that an SDK approach would fragment maintenance and restrict flexibility.
 
-Every span includes contextual attributes such as:
+Hence the pivot:
 
-- `source_system`
+> **Move all ingestion logic behind a centralized API service** that provides a language-, framework-, and platform-agnostic contract.
+
+---
+
+## 2️⃣ Why API-First?
+
+|**SDK Approach**|**API Approach**|
+|---|---|
+|Each team embeds a library → dependency/version drift|Single centrally deployed service; one version to maintain|
+|Java-only, Spring-bound|Language-agnostic (curl, Python, .NET, Node, etc.)|
+|Requires shipping binaries|Call over HTTP/gRPC; no redeploys for new features|
+|Local configuration & secrets|Managed centrally with Vault/Key Vault|
+|Limited visibility of jobs|Full control plane: audit, metrics, lineage|
+
+### ✅ Benefits
+
+- **Unified orchestration** for both **batch** and **streaming** ingestion.
     
-- `dataset_name`
+- **Single base** to manage, monitor, and upgrade.
     
-- `batch_id`
+- **Consistent behavior** across teams & tech stacks.
     
-- `file_name`
+- **Multi-tenant** ready — one service can host many teams.
     
-- `record_count`
+- **Centralized policy enforcement** (data residency, access, PII masking, etc.).
     
-- `checksum`
-    
-- timestamps for start, validation, and landing.
+- **Easier troubleshooting & observability** with job-centric telemetry.
     
 
 ---
 
-### **2. File Upload to ADLS (Traced via OpenTelemetry)**
+## 3️⃣ High-Level Architecture
 
-When the SDK performs the file upload using the **Azure ADLS SDK**, the operation runs within a **child span** of the file trace.
+**External Teams → API Gateway → Ingestion Control Plane → Job Runners → Target Systems**
 
-This captures:
-
-- ADLS container and path information,
+1. **External Callers**
     
-- transfer duration and file size,
-    
-- retry attempts (if any),
-    
-- upload status, and
-    
-- resulting blob ETag or version ID.
-    
-
-By instrumenting the ADLS SDK calls, the platform can visualize file-level ingestion latency and detect anomalies (for example, network slowness or frequent retries).
-
----
-
-### **3. Transition from File to Kafka Events**
-
-When the **PySpark fan-out job** reads the file from ADLS and emits individual records into Kafka, it **propagates the same trace context** created during file ingestion.
-
-- Each Kafka record carries a **Correlation ID** (derived from the original Trace ID).
-    
-- This correlation ID is included in the message headers, allowing downstream consumers — especially those using the **Enterprise Kafka SDK** — to connect every event back to the file it originated from.
-    
-
-This forms a continuous, linked trace chain:  
-**File Trace (Spring-Batch)** → **ADLS Upload Span** → **Kafka Record Spans** → **Delta Write Spans**.
-
----
-
-### **4. Correlation ID Usage**
-
-The **Correlation ID** acts as the **link between systems**:
-
-- It identifies **which file a Kafka record came from**.
-    
-- It lets you query downstream telemetry (logs, traces, metrics) to find:
-    
-    - the exact Kafka topic and partition where a record landed,
+    - Provide data-source details, credentials, and target definitions.
         
-    - the offset and timestamp of publication,
+    - Can be any language or framework.
         
-    - the associated Delta table row if applicable.
+2. **API Gateway**
+    
+    - Handles authentication (OAuth2 / JWT), throttling, and routing.
+        
+3. **Control Plane (Spring Boot service)**
+    
+    - Accepts job definitions (“JobSpec”), validates them, and persists metadata.
+        
+    - Launches background jobs through a worker pool or thread scheduler.
+        
+    - Exposes lifecycle endpoints: `start`, `stop`, `status`, etc.
+        
+    - Publishes job state events (for UI / webhooks).
+        
+4. **Worker Plane**
+    
+    - Executes the actual ingestion logic (connectors for Blob, MSSQL, Mongo, Kafka, etc.).
+        
+    - Runs multi-threaded jobs per tenant and scales horizontally.
+        
+    - Reports progress & metrics back to the control plane.
+        
+5. **Metastore / Persistence**
+    
+    - Stores job definitions, statuses, run history, and metrics.
+        
+    - Enables re-runs, DLQ inspection, and lineage queries.
+        
+6. **Target Systems (Sinks)**
+    
+    - ADLS / Databricks Delta, Kafka, JDBC targets, etc.
         
 
-This ID appears consistently in:
+---
 
-- Spring-Batch SDK logs (file discovery and upload),
+## 4️⃣ Job Lifecycle
+
+1. **Job submission** → User calls `POST /jobs` with a JSON spec.
     
-- PySpark logs (record fan-out to Kafka),
+2. **Immediate response** → Service returns a `jobId` and marks state as `QUEUED`.
     
-- Kafka consumer logs (Enterprise SDK),
+3. **Background execution** → Worker threads pick up the job and begin ingestion.
     
-- and Databricks ingestion metrics (Delta writes).
+4. **Status tracking** →
+    
+    - `GET /jobs/{id}` → current state (`RUNNING`, `FAILED`, `SUCCEEDED`, etc.)
+        
+    - `GET /jobs/{id}/runs` → historical executions.
+        
+    - `DELETE /jobs/{id}` → stop or cancel running job.
+        
+5. **Metrics & logs** published continuously.
+    
+
+All job complexity (threading, retries, DLQ, schema validation, etc.) remains internal — callers only see clean API contracts.
+
+---
+
+## 5️⃣ Supported Ingestion Types
+
+|**Mode**|**Description**|**Examples**|
+|---|---|---|
+|**Batch (non-streaming)**|Finite bulk transfer; source → sink once per trigger|SQL Server → ADLS Delta Merge|
+|**Streaming (continuous)**|Event/record-based flow; near real-time|Kafka → Delta Lake; Mongo CDC → Kafka|
+|**Hybrid**|Scheduled micro-batches|Files → Databricks via COPY INTO|
+
+A single API unifies both — teams just specify mode and connector options.
+
+---
+
+## 6️⃣ External API Design (Conceptual)
+
+|**Endpoint**|**Purpose**|
+|---|---|
+|`POST /jobs`|Create & start a new job; returns `jobId`.|
+|`GET /jobs/{jobId}`|Get current status & metrics.|
+|`GET /jobs`|List all jobs (filter by tenant/status).|
+|`DELETE /jobs/{jobId}`|Stop / cancel job execution.|
+|`POST /jobs/{jobId}/runs`|Trigger ad-hoc rerun with overrides.|
+|`GET /jobs/{jobId}/runs/{runId}/logs`|Stream logs.|
+
+All endpoints will be secured by tenant-scoped auth and role-based permissions.
+
+---
+
+## 7️⃣ Threading & Performance Model
+
+- Each incoming request spawns a **lightweight background thread** (or worker task) so the API remains responsive.
+    
+- Threads are isolated per tenant and per job for concurrency control.
+    
+- Job queue maintains **priority** and **retry** metadata.
+    
+- **Multiple worker threads** can run concurrently for high-throughput workloads.
     
 
 ---
 
-### **5. End-to-End Observability**
+## 8️⃣ Example Flow
 
-With OpenTelemetry integrated across all components, we can visualize the entire ingestion flow as a single trace in APM tools such as **Dynatrace**, **Datadog**, or **AppDynamics**.
+**Use-case:** Team A wants to copy data from _MongoDB → ADLS_.
 
-A single trace view shows:
-
-1. **File discovered** by Spring-Batch SDK.
+1. Team A calls `POST /jobs` with:
     
-2. **File validated and uploaded** to ADLS.
+    - Source: Mongo credentials & query.
+        
+    - Sink: ADLS container & folder.
+        
+    - Mode: Batch.
+        
+2. API validates credentials (Vault lookup) and spawns a worker thread.
     
-3. **PySpark job triggered** for that file.
+3. Worker reads data in parallel partitions and writes to ADLS.
     
-4. **Records produced** to Kafka with correlation ID.
+4. API exposes progress via `GET /jobs/{id}` →
     
-5. **Records consumed and persisted** to Databricks Delta.
+    ```json
+    {
+      "jobId": "12345",
+      "status": "RUNNING",
+      "completedBatches": 3,
+      "totalBatches": 10
+    }
+    ```
     
-
-Each step’s latency, status, and errors are automatically visible, enabling:
-
-- real-time SLA monitoring,
-    
-- pinpointing bottlenecks,
-    
-- and complete data lineage auditability.
-    
-
----
-
-### **6. Benefits**
-
-- **Traceability:** Every record can be traced back to its source file and batch run.
-    
-- **Visibility:** Complete observability chain across Spring Batch, ADLS SDK, PySpark, Kafka, and Databricks.
-    
-- **Faster troubleshooting:** Quick isolation of ingestion delays or failures.
-    
-- **Audit readiness:** Regulatory and compliance teams can prove how data flowed and when.
+5. Once complete, `status` becomes `SUCCEEDED` with artifact links and metrics.
     
 
 ---
 
-**In summary:**  
-The **OpenTelemetry-based tracing** and **correlation ID** mechanism ensure that every file and record is fully traceable across systems — from ingestion to ADLS landing, Kafka publishing, and Delta Lake storage — providing true end-to-end observability for the entire data ingestion lifecycle.
+## 9️⃣ Monitoring & Observability
+
+- Every job emits **OpenTelemetry traces** with `traceId / jobId` correlation.
+    
+- Metrics (success rate, throughput, latency, DLQ count) exported to Prometheus/Grafana.
+    
+- Logs centralized in Splunk or ELK with per-tenant filters.
+    
+- Optional Webhook subscriptions for job completion or failure events.
+    
 
 ---
 
-Would you like me to add one short paragraph after this explaining **how these traces appear in Dynatrace (Smartscape/Traces UI)** — just to make the operational view complete?
+## 🔟 Security & Multi-Tenancy
+
+- **AuthN:** OAuth 2.0 / JWT.
+    
+- **AuthZ:** RBAC — job owners vs. readers.
+    
+- **Secrets:** Managed via Vault / Key Vault references; never stored in plain text.
+    
+- **Tenant isolation:** each job executes in a sandbox namespace; quotas enforced.
+    
+- **Audit trail:** every API call, job submission, and status change recorded.
+    
+
+---
+
+## 11️⃣ Implementation Roadmap
+
+|**Phase**|**Deliverable**|**Notes**|
+|---|---|---|
+|1|Core control plane (REST + Job Manager)|CRUD for jobs & runs|
+|2|Connector framework|Blob / SQL / Mongo / Kafka adapters|
+|3|Worker pool & async execution|Threaded jobs, queue, DLQ|
+|4|Metrics & logging integration|OTel + Prometheus + Splunk|
+|5|Scheduling & webhooks|cron triggers, alerts|
+|6|UI / CLI client (optional)|for monitoring & manual triggers|
+
+---
+
+## 12️⃣ Summary
+
+By **abstracting ingestion logic behind a single API layer**, we:
+
+- Eliminate SDK version drift and language lock-in.
+    
+- Centralize governance, monitoring, and retries.
+    
+- Enable every team (Java, Python, . NET, etc.) to launch data movements uniformly.
+    
+- Prepare for multi-tenant scalability and future self-serve job management.
+    
+
+This approach unifies **batch** and **streaming** ingestion on one platform and ensures consistent, auditable data movement across the enterprise.
+
+---
+
+> 🕒 _If the team agrees with this approach, next step will be to finalize endpoint contracts and internal job lifecycle diagrams for the 3 PM review._
+
+---
+
+Would you like me to generate the **Confluence page with styling (headings, tables, callouts, emojis, etc.)** in actual Confluence markup or Markdown format so you can paste it directly?
