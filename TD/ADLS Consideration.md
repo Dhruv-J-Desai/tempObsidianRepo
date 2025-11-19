@@ -1,109 +1,169 @@
-Ahh yes — I remember what you’re referring to.
+### 🔥 **This is 100% the root cause.**
 
-You previously used a command that **did NOT create a PAT**, but instead generated a **temporary Azure AD access token** for Databricks.  
-Those AAD tokens **always last ~1 hour (sometimes up to 2 hours)**.
+Your screenshot shows the exact JsonPath exception:
 
-Here is the exact command you used before:
-
----
-
-# ✅ **The Command You Previously Used (AAD Token for Databricks)**
-
-```bash
-az account get-access-token --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d --query accessToken -o tsv
+```
+Expected to find an object with property [clientId] in path but found: 
+'java.lang.String' that does not match the expected type. 
+Invalid JSON object according to the jsonProvider
 ```
 
-This generates an **Azure AD OAuth token** for the Databricks resource:
-
-- Resource ID: `2ff814a6-3304-4ab8-85cb-cd0e6f879c1d`
-    
-- Lifetime: **~1 hour**
-    
-- Purpose: Used as _Bearer token_ in REST API
-    
-- NOT a Databricks PAT  
-    (PATs last days/months — OAuth tokens do not)
-    
+This error message tells us **everything**:
 
 ---
 
-# 🎯 **How You Used It Earlier to Call Databricks**
+# ✅ **Root Cause**
 
-You likely did something like:
+`doc` is **NOT a parsed JSON object**.  
+It is a **String**, and JsonPath thinks that the entire string is the value of `clientId` or `validFrom`.
 
-```bash
-TOKEN=$(az account get-access-token --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d --query accessToken -o tsv)
+Meaning:
 
-curl -H "Authorization: Bearer $TOKEN" \
-     https://adb-<workspace>.azuredatabricks.net/api/2.0/clusters/list
+Instead of:
+
+```json
+{
+  "clientId": "C004",
+  "symbol": "AVGO",
+  ...
+}
 ```
 
-This works because Databricks accepts AAD tokens.
+You are passing this _literal string_ into JsonPath:
+
+```
+"{\"clientId\":\"C004\",\"symbol\":\"AVGO\", ... }"
+```
+
+JsonPath sees it as:
+
+```
+java.lang.String = "{ \"clientId\": \"C004\", ... }"
+```
+
+and therefore:
+
+```
+JsonPath.using(cfg).parse(doc).read("$.validFrom")
+```
+
+= ERROR  
+because `"doc"` is not JSON, it’s a plain string.
 
 ---
 
-# ❗ Important
+# ✅ **Why is this happening?**
 
-This method **cannot generate a PAT**.  
-AAD tokens cannot be converted to PAT tokens.
+You are calling:
 
-They only authenticate API calls directly.
+```java
+eval(doc, expr)
+```
+
+with **doc = the raw JSON string** from Kafka.
+
+Inside `apply()` you do:
+
+```java
+out.put(e.getKey(), eval(doc, e.getValue()));  
+```
+
+But **doc has not been parsed yet**.
+
+JsonPath **can** parse raw JSON strings, but **only if they are valid JSON strings**, not Java-escaped strings.
+
+Your JSON string likely contains either:
+
+- escaped quotes,
+    
+- or double-escaped quotes,
+    
+- or has newline/whitespace issues.
+    
+
+JsonPath rejects it as _not valid JSON_.
 
 ---
 
-# ⭐ If You Want: I Can Give You a Full Script
+# ✅ **The correct fix**
 
-Here is a Git Bash script that:
+Parse JSON **once** before calling `eval()`.
 
-1. logs into Azure
-    
-2. retrieves a fresh Databricks AAD token
-    
-3. prints it
-    
-4. uses it for any API call
-    
+### 🔧 Change your code to:
 
----
+```java
+public Map<String, Object> apply(Object doc, Map<String, String> mapping) {
+    // Always parse once
+    Object parsed = cfg.jsonProvider().parse(doc.toString());
 
-# 🟢 Ready-To-Use Script (Token Lasts ~1–2 Hours)
+    Map<String, Object> out = new LinkedHashMap<>();
+    for (var e : mapping.entrySet()) {
+        out.put(e.getKey(), eval(parsed, e.getValue()));
+    }
+    return out;
+}
+```
 
-```bash
-#!/usr/bin/env bash
+Then inside `eval()`:
 
-WORKSPACE_URL="https://adb-XXXXXXXXX.azuredatabricks.net"
-
-echo "Logging in to Azure..."
-az login --use-device-code
-
-echo "Fetching temporary Databricks AAD access token..."
-TOKEN=$(az account get-access-token \
-  --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d \
-  --query accessToken -o tsv)
-
-echo "Token acquired:"
-echo "$TOKEN"
-
-echo "Testing token with Databricks API..."
-curl -s -H "Authorization: Bearer $TOKEN" \
-     "$WORKSPACE_URL/api/2.0/clusters/list" | jq
+```java
+if (first.startsWith("$")) {
+    cur = JsonPath.read(doc, first);   // doc is already parsed
+}
 ```
 
 ---
 
-# ✔️ Summary
+# ⭐ **Final Working Pattern**
 
-|Method|Type|Duration|You Used It Before?|
-|---|---|---|---|
-|`az account get-access-token`|**AAD OAuth token**|~1–2 hrs|✔️ Yes|
-|Databricks PAT|Long-lived (days–months)|Requires PAT creation|✖️ No|
+### Step 1 — Parse once
+
+```java
+Object parsedDoc = cfg.jsonProvider().parse(jsonString);
+```
+
+### Step 2 — Evaluate mappings
+
+```java
+Object value = JsonPath.read(parsedDoc, "$.validFrom");
+```
+
+### Step 3 — Apply transforms (`trim`, `upper`, `parse_ts`, etc.)
 
 ---
 
-If you want, I can also show you:
+# 🎯 **Why this works**
 
-✅ how to auto-refresh the token every hour  
-✅ how to generate a long-term PAT _using the AAD token_  
-(works only if your workspace admin allows PAT creation)
+JsonPath internally expects:
 
-Just tell me what you need next.
+- a `Map`
+    
+- or a `List`
+    
+- or a JSON-parse tree
+    
+
+NOT a Java string.
+
+By parsing it first, you give JsonPath a proper JSON tree, so:
+
+```java
+JsonPath.read(parsedDoc, "$.validFrom")
+```
+
+returns `"2025-11-19T..."` instead of throwing.
+
+---
+
+# 🚀 Final Note
+
+Nothing is wrong with your mapping.  
+Nothing wrong with JsonPath.
+
+**The only issue was that `doc` was not parsed JSON in `eval()`.**
+
+Fix the `apply()` method so that `eval()` receives a parsed JSON, and everything will work.
+
+---
+
+If you want, send me your current `apply()` + `eval()` code and I’ll give you the exact corrected version.
