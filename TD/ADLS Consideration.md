@@ -1,84 +1,235 @@
-Yes, 100% – **that’s exactly what you should do** and it will get rid of the “tried to redefine field …” errors.
+Great — now your **duplicate-field errors are gone**, which means the `ensureRootField()` fix is working.
 
-You already have `TypeDefinitionRegistry` injected into your `@DgsCodeRegistry` method, so you can ask it:
+Now you’re seeing a **new error**, which is:
 
-> “Does `Query` already have a field called `X`? If yes → skip. If no → add it.”
+> **The type `Json` is not present when resolving type `Subscription`**
 
-Here’s a concrete pattern you can drop into your `DynamicDataFetcher`.
+This is very easy to fix — GraphQL is telling you:
+
+> “You are adding a field whose return type is `Json`, but you have _not defined_ what `Json` means anywhere in the schema.”
+
+---
+
+# ✅ Why this error now?
+
+In your dynamic code, you are doing:
 
 ```java
-@DgsCodeRegistry
-public GraphQLCodeRegistry.Builder registry(GraphQLCodeRegistry.Builder codeRegistryBuilder,
-                                            TypeDefinitionRegistry typeRegistry) {
+ensureRootField(registry, "Query", table.getName(), "Json");
+ensureRootField(registry, "Subscription", table.getName(), "Json");
+```
 
-    Collection<DatabricksTable> tables =
-            databricksService.getAllTables(databricksCatalog, false);
+So you are adding schema like:
 
-    for (DatabricksTable table : tables) {
-        String fieldName = table.getName();  // e.g. "trade", "accounts", "address"
-
-        // 1) Safely extend Query / Subscription
-        ensureRootField(typeRegistry, "Query", fieldName, "Json");          // or Trade, etc.
-        ensureRootField(typeRegistry, "Subscription", fieldName, "Json");   // optional
-
-        // 2) Wire data fetchers as you already do
-        FieldCoordinates queryCoords = FieldCoordinates.coordinates("Query", fieldName);
-        codeRegistryBuilder.dataFetcher(queryCoords, env -> getFromDatabricks(table));
-
-        FieldCoordinates subCoords = FieldCoordinates.coordinates("Subscription", fieldName);
-        codeRegistryBuilder.dataFetcher(subCoords, env -> getAllDataFromTopic(table));
-    }
-
-    return codeRegistryBuilder;
+```graphql
+type Query {
+  trade: [Json]
 }
 
-/**
- * Add "fieldName: [elementTypeName]" to the given root type (Query/Subscription)
- * only if it does NOT already exist.
- */
-private void ensureRootField(TypeDefinitionRegistry registry,
-                             String rootTypeName,
-                             String fieldName,
-                             String elementTypeName) {
-
-    registry.getType(rootTypeName).ifPresent(def -> {
-        ObjectTypeDefinition root = (ObjectTypeDefinition) def;
-
-        // --- check first ---
-        boolean alreadyExists = root.getFieldDefinitions().stream()
-                .anyMatch(fd -> fd.getName().equals(fieldName));
-
-        if (alreadyExists) {
-            // e.g. accounts, address, users – already defined in .graphqls
-            return;   // do NOT add again → no "redefine field" error
-        }
-
-        // build field definition: fieldName: [elementTypeName]
-        Type elementType = new TypeName(elementTypeName);   // "Json", "Trade", etc.
-        Type listType   = new ListType(elementType);
-
-        FieldDefinition newField = FieldDefinition.newFieldDefinition()
-                .name(fieldName)
-                .type(listType)
-                .build();
-
-        // transform existing root type to include the new field
-        ObjectTypeDefinition updatedRoot = root.transform(builder ->
-                builder.fieldDefinition(newField));
-
-        registry.remove(root);
-        registry.add(updatedRoot);
-    });
+type Subscription {
+  trade: [Json]
 }
 ```
 
-### What this gives you
+But **GraphQL does not know what `Json` is.**
 
-- If `accounts`, `address`, `users`, etc. are **already defined** in your static `.graphqls`, this helper sees them and **skips** adding them again → no redefinition errors.
+There is:
+
+- no scalar named `Json`
     
-- New things like `trade` (which are not in SDL) **do get added** and wired to your DataFetchers.
+- no object type named `Json`
     
-- Bronze can be turned on without crashing, because you’re no longer blindly redefining existing fields.
+- no custom scalar registered in your runtime wiring
     
 
-So yes: **“check before adding” is the right fix**, and the snippet above is the GraphQL-java/DGS way to do it.
+So the schema becomes invalid.
+
+That’s why the error is:
+
+> **The type 'Json' is not present**
+
+---
+
+# ✅ How to fix (3 options)
+
+---
+
+## **Option 1 (Recommended): use DGS built-in `@DgsScalar(UUID: JSON)`**
+
+DGS provides a JSON scalar named **`_Any`**, but not plain `Json`.
+
+Spring Boot GraphQL has `GraphQLScalarType` for JSON, but not DGS by default.
+
+Instead, DGS suggests using:
+
+```java
+import com.netflix.graphql.dgs.scalars.DgsScalar;
+import com.netflix.graphql.dgs.internal.types.DgsScalarTypes;
+```
+
+They provide:
+
+```graphql
+scalar _Any
+```
+
+But better: **Define your own JSON scalar once**, and reuse it.
+
+---
+
+### 👉 Add this class:
+
+```java
+@DgsScalar(name = "Json")
+public class JsonScalar implements Coercing<Object, Object> {
+    @Override
+    public Object serialize(Object dataFetcherResult) {
+        return dataFetcherResult;
+    }
+
+    @Override
+    public Object parseValue(Object input) {
+        return input;
+    }
+
+    @Override
+    public Object parseLiteral(Object input) {
+        if (input instanceof Value) {
+            return ((Value) input).toString();
+        }
+        return null;
+    }
+}
+```
+
+Add this file anywhere in your project (e.g. `scalars/JsonScalar.java`).
+
+### Then your dynamic field:
+
+```java
+ensureRootField(registry, "Query", tableName, "Json");
+```
+
+starts working, because `Json` now exists.
+
+---
+
+## **Option 2 — Don’t use Json at all (use String)**
+
+If your table returns a raw Map and you want GraphQL to return a JSON string:
+
+Do:
+
+```java
+ensureRootField(registry, "Query", tableName, "String");
+```
+
+This completely avoids custom scalars.
+
+---
+
+## **Option 3 — Use a proper object type instead of Json**
+
+For example:
+
+```graphql
+type Trade {
+  payload: String
+  topic: String
+  ingest_time: String
+}
+```
+
+Then:
+
+```java
+ensureRootField(registry, "Query", tableName, "Trade");
+```
+
+But this requires generating a GraphQLObjectType dynamically — more work.
+
+---
+
+# 🔥 What you should do right now
+
+**Fastest working fix** = Option 1: add a JSON scalar.
+
+---
+
+# 📌 Steps to fix your current error
+
+### 1. Create a JSON scalar class:
+
+```java
+package com.example.scalars;
+
+import com.netflix.graphql.dgs.DgsScalar;
+import graphql.language.Value;
+import graphql.schema.Coercing;
+
+@DgsScalar(name = "Json")
+public class JsonScalar implements Coercing<Object, Object> {
+    @Override
+    public Object serialize(Object dataFetcherResult) {
+        return dataFetcherResult;
+    }
+
+    @Override
+    public Object parseValue(Object input) {
+        return input;
+    }
+
+    @Override
+    public Object parseLiteral(Object input) {
+        if (input instanceof Value) {
+            return input.toString();
+        }
+        return null;
+    }
+}
+```
+
+### 2. Restart the app.
+
+### 3. Run GraphQL again.
+
+The Subscription + Query fields will now be valid, because `Json` is a known GraphQL type.
+
+---
+
+# ⭐ Confirming why Subscription specifically failed
+
+The error message says:
+
+> “when resolving type `Subscription`”
+
+Because both:
+
+```java
+ensureRootField(registry, "Subscription", table.getName(), "Json")
+```
+
+AND your DataFetcher return type use `"Json"`.
+
+GraphQL validates subscription schema strictly.
+
+---
+
+# If you want, I can rewrite your whole `DynamicDataFetcher` into a clean, production-ready class that works with:
+
+- dynamic schema merging
+    
+- JSON scalar
+    
+- table schema detection
+    
+- bronze/silver/gold separation
+    
+- full wiring for Query + Subscription
+    
+- no duplicate fields
+    
+- no missing types
+    
+
+Just say **“Rewrite DynamicDataFetcher completely”**.
