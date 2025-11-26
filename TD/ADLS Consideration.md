@@ -1,194 +1,207 @@
-OK — now I can clearly see **why your rows STILL show all `null` in DeepHaven / Angular.**
+Exactly 👍 — the fact that **`trade` isn’t listed under `Query`** in the Docs pane is the smoking gun.
 
-You **did NOT apply the real fix.**  
-You only added `_parse_schema` (returns list of pairs), and then you still do:
+Now the job is: **teach DGS/GraphQL that `Query.trade` is a real field**, not just a DataFetcher.
 
-```python
-cols = _parse_schema(schema)
-update_exprs = []
-tbl = tbl.update(update_exprs)
-```
-
-🚨 **This is NOT how DeepHaven consumes Kafka JSON.**  
-You are _manually_ trying to parse JSON inside Python using:
-
-```python
-f"{name} = (int) value['{name}']"
-```
-
-But your Kafka messages ARE like:
-
-```json
-{
-  "clientId": "A101",
-  "symbol": "TSLA",
-  "direction": "BUY",
-  "quantity": 10,
-  "price": 200.50
-}
-```
-
-Deephaven Kafka consumer does **NOT** expose a column named `"value"`, so this expression always fails silently → all columns become `null`.
+Below is how to do that _programmatically_ in your existing `@DgsCodeRegistry` method.
 
 ---
 
-# ✅ The REAL fix (you must replace your current logic)
+## 1. What DGS is doing right now
 
-You must **NOT** parse JSON manually.
+Your method probably looks roughly like:
 
-You must call:
+```java
+@DgsCodeRegistry
+public GraphQLCodeRegistry.Builder registry(GraphQLCodeRegistry.Builder codeRegistryBuilder,
+                                            TypeDefinitionRegistry registry) {
 
-```python
-value_spec = kc.json_spec(schema_dict)
-```
+    Collection<DatabricksTable> tables = databricksService.getAllTables(databricksCatalog, false);
 
-and **schema_dict must be a real dict**, not a list, not a string.
+    for (var table : tables) {
+        String fieldName = table.getName();  // "trade"
 
-Right now you have:
+        DataFetcher<List<Map<String, Object>>> getFromDatabricks = env -> {
+            // ...
+        };
 
-```python
-v_spec = kc.json_spec()
-```
-
-and `schema` is a string, not a dict.
-
-This is why everything stays null.
-
----
-
-# ✅ Correct version of create_live_table (copy–paste EXACTLY this)
-
-Replace your entire function body with this:
-
-```python
-def _schema_to_dict(schema):
-    if isinstance(schema, dict):
-        return schema
-
-    if isinstance(schema, str):
-        result = {}
-        for line in schema.strip().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-
-            name, dtype_expr = [p.strip() for p in line.split(":", 1)]
-
-            # dtype_expr is "dht.string" etc
-            dtype = eval(dtype_expr, {"dht": dht})
-            result[name] = dtype
-
-        return result
-
-    raise TypeError(f"Invalid schema type: {type(schema)}")
-
-
-def create_live_table(topic: str, schema, alias: str | None = None,
-                      bootstrap: str | None = None, table_type: str = "append",
-                      ignore_key: bool = True):
-    if not topic:
-        raise ValueError("topic is required")
-
-    name = alias or topic.replace("-", "_")
-
-    # -------------------------
-    # FIX: schema must be dict
-    # -------------------------
-    schema_dict = _schema_to_dict(schema)
-
-    config = {
-        "bootstrap.servers": "pkc-k13op.canadacentral.azure.confluent.cloud:9092",
-        "auto.offset.reset": "latest",
-        "security.protocol": "SASL_SSL",
-        "sasl.mechanism": "OAUTHBEARER",
-        "sasl.login.callback.handler.class": "org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
-        "sasl.jaas.config":
-            "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required "
-            'clientId="TestScopeClient" '
-            'clientSecret="2Federate" '
-            'scope="" '
-            'extension_logicalCluster="lkc-ygyvwp" '
-            'extension_identityPoolId="pool-NRk1";',
-        "sasl.oauthbearer.token.endpoint.url": "https://fedsit.rastest.tdbank.ca/as/token.oauth2",
-        "sasl.oauthbearer.sub.claim.name": "client_id",
-        "sasl.oauthbearer.client.id": "TestScopeClient",
-        "sasl.oauthbearer.client.secret": "2Federate",
-        "sasl.oauthbearer.extensions.logicalCluster": "lkc-ygyvwp",
-        "sasl.oauthbearer.extensions.identityPoolId": "pool-NRk1",
-        "enable.auto.commit": "false",
-        "deephaven.kafka.skip.partition.column": "true",
-        "deephaven.kafka.skip.offset.column": "true",
-        "deephaven.kafka.skip.timestamp.column": "true",
-        "deephaven.kafka.skip.key.column": "true",
+        FieldCoordinates coords = FieldCoordinates.coordinates("Query", fieldName);
+        codeRegistryBuilder.dataFetcher(coords, getFromDatabricks);
     }
 
-    # -------------------------
-    # FIX: correct json_spec usage
-    # -------------------------
-    value_spec = kc.json_spec(schema_dict)
-    key_spec = kc.KeyValueSpec.IGNORE if ignore_key else None
-
-    ttype = kc.TableType.Append if table_type.lower() == "append" else kc.TableType.Blink
-
-    tbl = kc.consume(
-        config,
-        topic,
-        key_spec=key_spec,
-        value_spec=value_spec,
-        table_type=ttype,
-    )
-
-    # cleanup metadata
-    for col in ("KafkaPartition", "KafkaOffset", "KafkaTimestamp", "KafkaKey"):
-        if col in tbl.columns:
-            tbl = tbl.dropColumns(col)
-
-    globals()[name] = tbl
-    setattr(__main__, name, tbl)
-
-    print(f"[DH] Created {name} from topic '{topic}'")
-    return name
-```
-
----
-
-# 🚀 Why this works
-
-Because now:
-
-- `schema` string → `schema_dict = {"clientId": dht.string, ...}`
-    
-- `kc.json_spec(schema_dict)` tells Deephaven how to decode JSON
-    
-- Kafka consumer returns columns directly mapped to your JSON fields
-    
-- NO need for `tbl.update()` / `value['field']` parsing
-    
-- Angular receives clean objects:
-    
-
-```json
-{
-  "clientId": "A101",
-  "symbol": "TSLA",
-  "direction": "BUY",
-  "quantity": 10,
-  "price": 200.5
+    return codeRegistryBuilder;
 }
 ```
 
+So you’re only wiring **DataFetchers**.  
+We need to **also mutate the SDL** (`TypeDefinitionRegistry`) to add the fields.
+
 ---
 
-# 🔥 NEXT — Do this test
+## 2. Add `trade` as a field on `Query` (programmatically)
 
-Inside Deephaven console run:
+Here’s one way to extend your method so, for _each_ table, we:
 
-```python
-trade.head(5)
+- add a `Query.<fieldName>` field definition
+    
+- (optionally) add a `Subscription.<fieldName>` field too
+    
+- then wire the DataFetcher
+    
+
+```java
+@DgsComponent
+@RequiredArgsConstructor
+public class DynamicDataFetcher {
+
+    private final DatabricksService databricksService;
+    private final ConcurrentKafkaListenerContainerFactory<String, String> containerFactory;
+    private final ObjectMapper objectMapper;
+
+    @Value("${dataproductgen.catalog}")
+    private String databricksCatalog;
+
+    @DgsCodeRegistry
+    public GraphQLCodeRegistry.Builder registry(GraphQLCodeRegistry.Builder codeRegistryBuilder,
+                                                TypeDefinitionRegistry typeRegistry) {
+
+        Collection<DatabricksTable> tables =
+                databricksService.getAllTables(databricksCatalog, false);
+
+        for (DatabricksTable table : tables) {
+
+            String fieldName = table.getName(); // e.g. "trade"
+
+            // 1) ----- mutate Query type SDL -----
+            addFieldToRootType(typeRegistry, "Query", fieldName);
+
+            // (optional) also add field to Subscription root:
+            // addFieldToRootType(typeRegistry, "Subscription", fieldName);
+
+            // 2) ----- create DataFetcher -----
+            DataFetcher<List<Map<String, Object>>> getFromDatabricks =
+                    env -> getAllDataFromTopic(fieldName); // or topicName
+
+            FieldCoordinates queryCoords =
+                    FieldCoordinates.coordinates("Query", fieldName);
+            codeRegistryBuilder.dataFetcher(queryCoords, getFromDatabricks);
+
+            // If you support subscription data fetchers you’d also
+            // wire them on ("Subscription", fieldName) here.
+        }
+
+        return codeRegistryBuilder;
+    }
+
+    /**
+     * Adds a field like:
+     *
+     *   type Query {
+     *       <fieldName>: [Json]   // or your own type
+     *   }
+     *
+     * to the given root type, if not already present.
+     */
+    private void addFieldToRootType(TypeDefinitionRegistry typeRegistry,
+                                    String rootTypeName,
+                                    String fieldName) {
+
+        // Find the root type definition (Query or Subscription)
+        typeRegistry.getType(rootTypeName).ifPresent(def -> {
+            ObjectTypeDefinition root = (ObjectTypeDefinition) def;
+
+            // Don’t add twice
+            boolean exists = root.getFieldDefinitions().stream()
+                    .anyMatch(f -> f.getName().equals(fieldName));
+            if (exists) return;
+
+            // Define field: change return type as you like
+            FieldDefinition fieldDef = FieldDefinition
+                    .newFieldDefinition()
+                    .name(fieldName)
+                    // here I use [Json]; you can use a specific type name instead
+                    .type(new ListType(new TypeName("Json")))
+                    .build();
+
+            ObjectTypeDefinition newRoot = root.transform(builder ->
+                    builder.fieldDefinition(fieldDef));
+
+            typeRegistry.remove(root);
+            typeRegistry.add(newRoot);
+        });
+    }
+
+    private List<Map<String, Object>> getAllDataFromTopic(String topicName) {
+        // your existing Kafka container logic here
+        // return List<Map<String,Object>>;
+        return List.of();
+    }
+}
 ```
 
-If the values appear, Angular will immediately show non-null rows.
+### Notes
+
+- `TypeDefinitionRegistry` is the SDL representation DGS builds from your `.graphqls` files.
+    
+- By transforming `ObjectTypeDefinition Query` we’re effectively doing:
+    
+    ```graphql
+    extend type Query {
+      trade: [Json]
+    }
+    ```
+    
+    but programmatically.
+    
+- I used `[Json]` as the return type just as an example; if you already have a `Trade` type and want `[Trade]`, change:
+    
+    ```java
+    .type(new ListType(new TypeName("Trade")))
+    ```
+    
 
 ---
 
-If you want, show me your **actual schema string** and **one actual Kafka JSON message** — I will generate the exact schema dict for you too.
+## 3. How to verify it worked
+
+After you restart the app:
+
+1. Open GraphiQL Docs.
+    
+2. Click on `Query`.
+    
+3. You should now see fields like:
+    
+    - `address`
+        
+    - `trade`
+        
+    - `customerEvents`
+        
+    - etc. — one per Databricks table you looped over.
+        
+4. Run:
+    
+    ```graphql
+    {
+      trade {
+        payload
+        topic
+        key
+        headers
+        ingest_time
+        event_time
+        feed_name
+        ingestion_id
+        next_zone_status
+        next_zone_error
+        next_zone_processed_at
+      }
+    }
+    ```
+    
+    Now validation should pass and your `getAllDataFromTopic("trade")` should be hit.
+    
+
+---
+
+If you paste your current `DynamicDataFetcher` Java file, I can inline these changes into _your_ exact class so it’s a straight copy-paste for you.
