@@ -1,207 +1,84 @@
-Exactly 👍 — the fact that **`trade` isn’t listed under `Query`** in the Docs pane is the smoking gun.
+Yes, 100% – **that’s exactly what you should do** and it will get rid of the “tried to redefine field …” errors.
 
-Now the job is: **teach DGS/GraphQL that `Query.trade` is a real field**, not just a DataFetcher.
+You already have `TypeDefinitionRegistry` injected into your `@DgsCodeRegistry` method, so you can ask it:
 
-Below is how to do that _programmatically_ in your existing `@DgsCodeRegistry` method.
+> “Does `Query` already have a field called `X`? If yes → skip. If no → add it.”
 
----
-
-## 1. What DGS is doing right now
-
-Your method probably looks roughly like:
+Here’s a concrete pattern you can drop into your `DynamicDataFetcher`.
 
 ```java
 @DgsCodeRegistry
 public GraphQLCodeRegistry.Builder registry(GraphQLCodeRegistry.Builder codeRegistryBuilder,
-                                            TypeDefinitionRegistry registry) {
+                                            TypeDefinitionRegistry typeRegistry) {
 
-    Collection<DatabricksTable> tables = databricksService.getAllTables(databricksCatalog, false);
+    Collection<DatabricksTable> tables =
+            databricksService.getAllTables(databricksCatalog, false);
 
-    for (var table : tables) {
-        String fieldName = table.getName();  // "trade"
+    for (DatabricksTable table : tables) {
+        String fieldName = table.getName();  // e.g. "trade", "accounts", "address"
 
-        DataFetcher<List<Map<String, Object>>> getFromDatabricks = env -> {
-            // ...
-        };
+        // 1) Safely extend Query / Subscription
+        ensureRootField(typeRegistry, "Query", fieldName, "Json");          // or Trade, etc.
+        ensureRootField(typeRegistry, "Subscription", fieldName, "Json");   // optional
 
-        FieldCoordinates coords = FieldCoordinates.coordinates("Query", fieldName);
-        codeRegistryBuilder.dataFetcher(coords, getFromDatabricks);
+        // 2) Wire data fetchers as you already do
+        FieldCoordinates queryCoords = FieldCoordinates.coordinates("Query", fieldName);
+        codeRegistryBuilder.dataFetcher(queryCoords, env -> getFromDatabricks(table));
+
+        FieldCoordinates subCoords = FieldCoordinates.coordinates("Subscription", fieldName);
+        codeRegistryBuilder.dataFetcher(subCoords, env -> getAllDataFromTopic(table));
     }
 
     return codeRegistryBuilder;
 }
-```
 
-So you’re only wiring **DataFetchers**.  
-We need to **also mutate the SDL** (`TypeDefinitionRegistry`) to add the fields.
+/**
+ * Add "fieldName: [elementTypeName]" to the given root type (Query/Subscription)
+ * only if it does NOT already exist.
+ */
+private void ensureRootField(TypeDefinitionRegistry registry,
+                             String rootTypeName,
+                             String fieldName,
+                             String elementTypeName) {
 
----
+    registry.getType(rootTypeName).ifPresent(def -> {
+        ObjectTypeDefinition root = (ObjectTypeDefinition) def;
 
-## 2. Add `trade` as a field on `Query` (programmatically)
+        // --- check first ---
+        boolean alreadyExists = root.getFieldDefinitions().stream()
+                .anyMatch(fd -> fd.getName().equals(fieldName));
 
-Here’s one way to extend your method so, for _each_ table, we:
-
-- add a `Query.<fieldName>` field definition
-    
-- (optionally) add a `Subscription.<fieldName>` field too
-    
-- then wire the DataFetcher
-    
-
-```java
-@DgsComponent
-@RequiredArgsConstructor
-public class DynamicDataFetcher {
-
-    private final DatabricksService databricksService;
-    private final ConcurrentKafkaListenerContainerFactory<String, String> containerFactory;
-    private final ObjectMapper objectMapper;
-
-    @Value("${dataproductgen.catalog}")
-    private String databricksCatalog;
-
-    @DgsCodeRegistry
-    public GraphQLCodeRegistry.Builder registry(GraphQLCodeRegistry.Builder codeRegistryBuilder,
-                                                TypeDefinitionRegistry typeRegistry) {
-
-        Collection<DatabricksTable> tables =
-                databricksService.getAllTables(databricksCatalog, false);
-
-        for (DatabricksTable table : tables) {
-
-            String fieldName = table.getName(); // e.g. "trade"
-
-            // 1) ----- mutate Query type SDL -----
-            addFieldToRootType(typeRegistry, "Query", fieldName);
-
-            // (optional) also add field to Subscription root:
-            // addFieldToRootType(typeRegistry, "Subscription", fieldName);
-
-            // 2) ----- create DataFetcher -----
-            DataFetcher<List<Map<String, Object>>> getFromDatabricks =
-                    env -> getAllDataFromTopic(fieldName); // or topicName
-
-            FieldCoordinates queryCoords =
-                    FieldCoordinates.coordinates("Query", fieldName);
-            codeRegistryBuilder.dataFetcher(queryCoords, getFromDatabricks);
-
-            // If you support subscription data fetchers you’d also
-            // wire them on ("Subscription", fieldName) here.
+        if (alreadyExists) {
+            // e.g. accounts, address, users – already defined in .graphqls
+            return;   // do NOT add again → no "redefine field" error
         }
 
-        return codeRegistryBuilder;
-    }
+        // build field definition: fieldName: [elementTypeName]
+        Type elementType = new TypeName(elementTypeName);   // "Json", "Trade", etc.
+        Type listType   = new ListType(elementType);
 
-    /**
-     * Adds a field like:
-     *
-     *   type Query {
-     *       <fieldName>: [Json]   // or your own type
-     *   }
-     *
-     * to the given root type, if not already present.
-     */
-    private void addFieldToRootType(TypeDefinitionRegistry typeRegistry,
-                                    String rootTypeName,
-                                    String fieldName) {
+        FieldDefinition newField = FieldDefinition.newFieldDefinition()
+                .name(fieldName)
+                .type(listType)
+                .build();
 
-        // Find the root type definition (Query or Subscription)
-        typeRegistry.getType(rootTypeName).ifPresent(def -> {
-            ObjectTypeDefinition root = (ObjectTypeDefinition) def;
+        // transform existing root type to include the new field
+        ObjectTypeDefinition updatedRoot = root.transform(builder ->
+                builder.fieldDefinition(newField));
 
-            // Don’t add twice
-            boolean exists = root.getFieldDefinitions().stream()
-                    .anyMatch(f -> f.getName().equals(fieldName));
-            if (exists) return;
-
-            // Define field: change return type as you like
-            FieldDefinition fieldDef = FieldDefinition
-                    .newFieldDefinition()
-                    .name(fieldName)
-                    // here I use [Json]; you can use a specific type name instead
-                    .type(new ListType(new TypeName("Json")))
-                    .build();
-
-            ObjectTypeDefinition newRoot = root.transform(builder ->
-                    builder.fieldDefinition(fieldDef));
-
-            typeRegistry.remove(root);
-            typeRegistry.add(newRoot);
-        });
-    }
-
-    private List<Map<String, Object>> getAllDataFromTopic(String topicName) {
-        // your existing Kafka container logic here
-        // return List<Map<String,Object>>;
-        return List.of();
-    }
+        registry.remove(root);
+        registry.add(updatedRoot);
+    });
 }
 ```
 
-### Notes
+### What this gives you
 
-- `TypeDefinitionRegistry` is the SDL representation DGS builds from your `.graphqls` files.
+- If `accounts`, `address`, `users`, etc. are **already defined** in your static `.graphqls`, this helper sees them and **skips** adding them again → no redefinition errors.
     
-- By transforming `ObjectTypeDefinition Query` we’re effectively doing:
+- New things like `trade` (which are not in SDL) **do get added** and wired to your DataFetchers.
     
-    ```graphql
-    extend type Query {
-      trade: [Json]
-    }
-    ```
-    
-    but programmatically.
-    
-- I used `[Json]` as the return type just as an example; if you already have a `Trade` type and want `[Trade]`, change:
-    
-    ```java
-    .type(new ListType(new TypeName("Trade")))
-    ```
+- Bronze can be turned on without crashing, because you’re no longer blindly redefining existing fields.
     
 
----
-
-## 3. How to verify it worked
-
-After you restart the app:
-
-1. Open GraphiQL Docs.
-    
-2. Click on `Query`.
-    
-3. You should now see fields like:
-    
-    - `address`
-        
-    - `trade`
-        
-    - `customerEvents`
-        
-    - etc. — one per Databricks table you looped over.
-        
-4. Run:
-    
-    ```graphql
-    {
-      trade {
-        payload
-        topic
-        key
-        headers
-        ingest_time
-        event_time
-        feed_name
-        ingestion_id
-        next_zone_status
-        next_zone_error
-        next_zone_processed_at
-      }
-    }
-    ```
-    
-    Now validation should pass and your `getAllDataFromTopic("trade")` should be hit.
-    
-
----
-
-If you paste your current `DynamicDataFetcher` Java file, I can inline these changes into _your_ exact class so it’s a straight copy-paste for you.
+So yes: **“check before adding” is the right fix**, and the snippet above is the GraphQL-java/DGS way to do it.
