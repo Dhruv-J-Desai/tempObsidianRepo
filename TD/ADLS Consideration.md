@@ -1,235 +1,163 @@
-Great — now your **duplicate-field errors are gone**, which means the `ensureRootField()` fix is working.
+Here is the **cleanest and production-ready** way to generate **multiple fake events using Java Faker** and send them to Kafka using your new:
 
-Now you’re seeing a **new error**, which is:
+```java
+KafkaTemplate<String, TradeEvent>
+```
 
-> **The type `Json` is not present when resolving type `Subscription`**
-
-This is very easy to fix — GraphQL is telling you:
-
-> “You are adding a field whose return type is `Json`, but you have _not defined_ what `Json` means anywhere in the schema.”
+setup.
 
 ---
 
-# ✅ Why this error now?
+# ✅ 1. Add Java Faker Dependency
 
-In your dynamic code, you are doing:
+If not already added:
 
-```java
-ensureRootField(registry, "Query", table.getName(), "Json");
-ensureRootField(registry, "Subscription", table.getName(), "Json");
+```xml
+<dependency>
+    <groupId>com.github.javafaker</groupId>
+    <artifactId>javafaker</artifactId>
+    <version>1.0.2</version>
+</dependency>
 ```
 
-So you are adding schema like:
+---
 
-```graphql
-type Query {
-  trade: [Json]
+# ✅ 2. Create a Faker-based TradeEvent Generator
+
+Create a utility/service that generates a single fake TradeEvent.
+
+### Example TradeEvent model (your fields may vary):
+
+```java
+public record TradeEvent(
+        String clientId,
+        String symbol,
+        double quantity,
+        double price,
+        String direction,
+        String ingestTime,
+        String validFrom,
+        String validTo,
+        boolean isCurrent
+) {}
+```
+
+### Create Faker generator:
+
+```java
+import com.github.javafaker.Faker;
+
+@Service
+public class FakeTradeEventFactory {
+
+    private final Faker faker = new Faker();
+
+    public TradeEvent generate() {
+        String[] symbols = {"TSLA", "NVDA", "AAPL", "AVGO", "MSFT"};
+        String[] directions = {"BUY", "SELL"};
+
+        String symbol = symbols[faker.number().numberBetween(0, symbols.length)];
+        String direction = directions[faker.number().numberBetween(0, directions.length)];
+
+        return new TradeEvent(
+                "C00" + faker.number().numberBetween(1, 9),
+                symbol,
+                faker.number().randomDouble(0, 50, 500),   // quantity
+                faker.number().randomDouble(2, 100, 500),  // price
+                direction,
+                Instant.now().toString(),
+                Instant.now().toString(),
+                "9999-12-31T23:59:59.000Z",
+                true
+        );
+    }
 }
-
-type Subscription {
-  trade: [Json]
-}
 ```
 
-But **GraphQL does not know what `Json` is.**
-
-There is:
-
-- no scalar named `Json`
-    
-- no object type named `Json`
-    
-- no custom scalar registered in your runtime wiring
-    
-
-So the schema becomes invalid.
-
-That’s why the error is:
-
-> **The type 'Json' is not present**
-
 ---
 
-# ✅ How to fix (3 options)
+# ✅ 3. Modify Producer to Send Multiple Events
 
----
-
-## **Option 1 (Recommended): use DGS built-in `@DgsScalar(UUID: JSON)`**
-
-DGS provides a JSON scalar named **`_Any`**, but not plain `Json`.
-
-Spring Boot GraphQL has `GraphQLScalarType` for JSON, but not DGS by default.
-
-Instead, DGS suggests using:
+You can now inject your faker factory and send as many events as required.
 
 ```java
-import com.netflix.graphql.dgs.scalars.DgsScalar;
-import com.netflix.graphql.dgs.internal.types.DgsScalarTypes;
-```
+@Service
+@Slf4j
+public class TradeEventProducerService {
 
-They provide:
+    private static final String TOPIC = "ccd01_sb_its_esp_tap3507_trade";
 
-```graphql
-scalar _Any
-```
+    private final KafkaTemplate<String, TradeEvent> kafkaTemplate;
+    private final FakeTradeEventFactory faker;
 
-But better: **Define your own JSON scalar once**, and reuse it.
-
----
-
-### 👉 Add this class:
-
-```java
-@DgsScalar(name = "Json")
-public class JsonScalar implements Coercing<Object, Object> {
-    @Override
-    public Object serialize(Object dataFetcherResult) {
-        return dataFetcherResult;
+    public TradeEventProducerService(KafkaTemplate<String, TradeEvent> kafkaTemplate,
+                                     FakeTradeEventFactory faker) {
+        this.kafkaTemplate = kafkaTemplate;
+        this.faker = faker;
     }
 
-    @Override
-    public Object parseValue(Object input) {
-        return input;
+    public void send(TradeEvent event) {
+        String key = event.clientId() + "-" + event.symbol();
+        kafkaTemplate.send(TOPIC, key, event);
     }
 
-    @Override
-    public Object parseLiteral(Object input) {
-        if (input instanceof Value) {
-            return ((Value) input).toString();
+    /** Send N fake events */
+    public void sendMultiple(int count) {
+        for (int i = 0; i < count; i++) {
+            TradeEvent event = faker.generate();
+            send(event);
+            log.info("Produced fake event: {}", event);
         }
-        return null;
     }
 }
 ```
 
-Add this file anywhere in your project (e.g. `scalars/JsonScalar.java`).
-
-### Then your dynamic field:
-
-```java
-ensureRootField(registry, "Query", tableName, "Json");
-```
-
-starts working, because `Json` now exists.
-
 ---
 
-## **Option 2 — Don’t use Json at all (use String)**
+# ✅ 4. Controller Endpoint (Optional)
 
-If your table returns a raw Map and you want GraphQL to return a JSON string:
-
-Do:
+Expose an endpoint to test:
 
 ```java
-ensureRootField(registry, "Query", tableName, "String");
-```
+@RestController
+@RequestMapping("/api/producer")
+public class ProducerController {
 
-This completely avoids custom scalars.
+    private final TradeEventProducerService producer;
 
----
-
-## **Option 3 — Use a proper object type instead of Json**
-
-For example:
-
-```graphql
-type Trade {
-  payload: String
-  topic: String
-  ingest_time: String
-}
-```
-
-Then:
-
-```java
-ensureRootField(registry, "Query", tableName, "Trade");
-```
-
-But this requires generating a GraphQLObjectType dynamically — more work.
-
----
-
-# 🔥 What you should do right now
-
-**Fastest working fix** = Option 1: add a JSON scalar.
-
----
-
-# 📌 Steps to fix your current error
-
-### 1. Create a JSON scalar class:
-
-```java
-package com.example.scalars;
-
-import com.netflix.graphql.dgs.DgsScalar;
-import graphql.language.Value;
-import graphql.schema.Coercing;
-
-@DgsScalar(name = "Json")
-public class JsonScalar implements Coercing<Object, Object> {
-    @Override
-    public Object serialize(Object dataFetcherResult) {
-        return dataFetcherResult;
+    public ProducerController(TradeEventProducerService producer) {
+        this.producer = producer;
     }
 
-    @Override
-    public Object parseValue(Object input) {
-        return input;
-    }
-
-    @Override
-    public Object parseLiteral(Object input) {
-        if (input instanceof Value) {
-            return input.toString();
-        }
-        return null;
+    @PostMapping("/generate/{count}")
+    public String generate(@PathVariable int count) {
+        producer.sendMultiple(count);
+        return "Produced " + count + " events";
     }
 }
 ```
 
-### 2. Restart the app.
+Now call:
 
-### 3. Run GraphQL again.
-
-The Subscription + Query fields will now be valid, because `Json` is a known GraphQL type.
-
----
-
-# ⭐ Confirming why Subscription specifically failed
-
-The error message says:
-
-> “when resolving type `Subscription`”
-
-Because both:
-
-```java
-ensureRootField(registry, "Subscription", table.getName(), "Json")
+```
+POST http://localhost:8080/api/producer/generate/10
 ```
 
-AND your DataFetcher return type use `"Json"`.
-
-GraphQL validates subscription schema strictly.
+→ Produces **10 fake trade events** to Kafka.
 
 ---
 
-# If you want, I can rewrite your whole `DynamicDataFetcher` into a clean, production-ready class that works with:
+# 🎉 Result
 
-- dynamic schema merging
+- Fake data is generated using Java Faker.
     
-- JSON scalar
+- Each event is a proper **TradeEvent POJO**.
     
-- table schema detection
+- KafkaTemplate with **JsonSerializer** serializes it to JSON.
     
-- bronze/silver/gold separation
-    
-- full wiring for Query + Subscription
-    
-- no duplicate fields
-    
-- no missing types
+- DeepHaven & Angular automatically pick up the new events.
     
 
-Just say **“Rewrite DynamicDataFetcher completely”**.
+---
+
+If you want **burst-mode**, **random delays**, or **infinite continuous streaming**, I can add that too—just tell me!
