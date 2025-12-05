@@ -1,0 +1,5 @@
+- SpEL
+- One Script to run all the programs
+- Move the upsert logic from Angular to DeepHaven
+- Look at Metrics View
+- Try to tune the performance of Streaming Ingestion SDK while doing SCD2-merge

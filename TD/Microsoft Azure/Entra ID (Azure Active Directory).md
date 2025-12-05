@@ -1,9 +1,0 @@
-- Microsoft's cloud identity and Access Management (IAM) directory for workforce, apps, devices, and non- human identities.
-- It has 3 core jobs:
-	- Who are you: Authentication (login, MFA, tokens)
-	- What can you do: Authorization (roles, RBAC, permissions)
-	- How do we enforce rules: Policies (Conditional Access, PIM, Identity protection)
-- Core objects and terminology:
-	- Tenant:
-	- Users and Groups: People and collections for access control.
-	- Applications and Service Principals: 
