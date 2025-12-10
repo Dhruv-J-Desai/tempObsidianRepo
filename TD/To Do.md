@@ -4,119 +4,189 @@
 - Look at Metrics View
 - Try to tune the performance of Streaming Ingestion SDK while doing SCD2-merge
 
-Nice, that screenshot actually shows exactly what we needed:
+Nice, glad it’s working now 🎉  
+Let’s turn what you have into a clean, “production-ish” `start-kafka-producer-consumer.sh`.
 
-- Build succeeded ✅
+Below is a full script that:
+
+- Fetches a fresh Databricks token via the CLI
     
-- Output location:  
-    `C:\Users\TAP3507\source\projects\TDSBI-POC\BIShowcase2025\thales-edge\dist\thales-edge`
+- Exports all the env vars your Spring Boot app expects (Kafka + Databricks)
+    
+- Starts the **jar** from a path relative to the script
+    
+- Has basic error-handling and clear logging
     
 
-That **`dist/thales-edge`** folder is your built Angular app.
-
-The only problem now is:
-
-```bash
-bash: zip: command not found
-```
-
-Git Bash on Windows doesn’t have the `zip` program installed, so that command just isn’t available. No big deal; we’ll zip it using Windows tools instead.
+You can drop this into your `shell-script-files` folder as `start-kafka-producer-consumer.sh`.
 
 ---
-
-## 1️⃣ Create the “jar-like” zip for the UI
-
-### Option A – easiest (File Explorer)
-
-1. Open Explorer to:
-    
-    ```text
-    C:\Users\TAP3507\source\projects\TDSBI-POC\BIShowcase2025\thales-edge\dist\
-    ```
-    
-2. Right-click the **`thales-edge`** folder  
-    → **Send to ➜ Compressed (zipped) folder**
-    
-3. Rename the zip to something like:
-    
-    ```text
-    ui-dist.zip
-    ```
-    
-4. Move `ui-dist.zip` next to your shell scripts, e.g.:
-    
-    ```text
-    C:\Users\TAP3507\source\shell-script-files\
-        start-angular.sh
-        ui-dist.zip
-    ```
-    
-
-Now you have the **Angular equivalent of a JAR**: `ui-dist.zip`.
-
----
-
-## 2️⃣ `start-angular.sh` that serves this zip
-
-Put this in `shell-script-files/start-angular.sh`:
 
 ```bash
 #!/usr/bin/env bash
+#
+# Start the Kafka Producer / Consumer demo with all required env vars.
+# - Fetches Databricks token via `databricks auth token`
+# - Exports Kafka + Databricks env vars
+# - Runs the Spring Boot jar
+#
+
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ARCHIVE="$SCRIPT_DIR/ui-dist.zip"
-UNPACK_DIR="$SCRIPT_DIR/ui-dist"
-APP_SUBDIR="thales-edge"   # folder inside the zip
+###############################################
+# 0. Resolve paths
+###############################################
 
-# 1. Unpack once
-if [ ! -d "$UNPACK_DIR/$APP_SUBDIR" ]; then
-  echo "==> Unpacking Angular UI from $ARCHIVE ..."
-  mkdir -p "$UNPACK_DIR"
-  unzip -q "$ARCHIVE" -d "$UNPACK_DIR"
+# Directory where this script lives
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Path to the jar (adjust name if you bump version)
+JAR_PATH="${SCRIPT_DIR}/jars/kafka-producer-consumer-0.0.1-SNAPSHOT.jar"
+
+if [[ ! -f "$JAR_PATH" ]]; then
+  echo "ERROR: Jar not found at: $JAR_PATH"
+  echo "       Make sure you built it and copied it to shell-script-files/jars/"
+  exit 1
 fi
 
-APP_DIR="$UNPACK_DIR/$APP_SUBDIR"
+###############################################
+# 1. Databricks configuration
+###############################################
 
-# 2. Serve static files
-echo "==> Serving Angular UI from: $APP_DIR"
-echo "    Open http://localhost:4200 in your browser"
+# Workspace + SQL warehouse
+export DATABRICKS_HOST="adb-3218410855619456.16.azuredatabricks.net"
+export DATABRICKS_HTTP_PATH="/sql/1.0/warehouses/2987cd418bca5dd5"
 
-npx serve "$APP_DIR" -l 4200
-```
+# Optional: if you use a specific profile name in ~/.databrickscfg
+# export DATABRICKS_CONFIG_PROFILE="default"
 
-Then:
+###############################################
+# 2. Fetch fresh Databricks token via CLI
+###############################################
 
-```bash
-cd /c/Users/TAP3507/source/shell-script-files
-chmod +x start-angular.sh
-./start-angular.sh
+echo "== Databricks auth =="
+if ! command -v databricks >/dev/null 2>&1; then
+  echo "ERROR: 'databricks' CLI not found on PATH."
+  echo "       Install Databricks CLI v0.228+ and run 'databricks auth login https://${DATABRICKS_HOST}' once."
+  exit 1
+fi
+
+echo "-> Fetching Databricks auth token via CLI..."
+echo "   (Make sure you have already run 'databricks auth login https://${DATABRICKS_HOST}' on this machine)"
+
+# If you use a profile, add:  --profile "$DATABRICKS_CONFIG_PROFILE"
+TOKEN_JSON="$(databricks auth token "https://${DATABRICKS_HOST}" 2>&1 || true)"
+
+# Extract "access_token" from the JSON using sed (no jq dependency)
+DATABRICKS_TOKEN_VALUE="$(
+  echo "$TOKEN_JSON" \
+    | tr -d '\r' \
+    | sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]\+\)".*/\1/p'
+)"
+
+if [[ -z "${DATABRICKS_TOKEN_VALUE}" ]]; then
+  echo "ERROR: Could not extract Databricks token from CLI output."
+  echo "Raw output from 'databricks auth token':"
+  echo "----------------------------------------"
+  echo "$TOKEN_JSON"
+  echo "----------------------------------------"
+  exit 1
+fi
+
+export DATABRICKS_TOKEN="${DATABRICKS_TOKEN_VALUE}"
+echo "-> Databricks token acquired."
+
+###############################################
+# 3. Kafka / Confluent + SDK env vars
+###############################################
+
+echo "== Kafka / SDK env vars =="
+
+# Confluent Cloud / Kafka cluster
+export bootstrap_servers="pkc-k13op.canadacentral.azure.confluent.cloud:9092"
+export ccloud_client_id="TestScopeClient"
+export ccloud_client_secret="2Federate"
+export ccloud_identity_pool="pool-NRkI"
+export ccloud_kafka_cluster_id="lkc-ygvwwp"
+
+# Consumer configuration
+export group_id="cc01_sb_its_esp_tap3507_customer"
+export concurrency="2"
+export poll_timeout_ms="1500"
+export backoff_delay_ms="1000"
+export backoff_max_retries="3"
+
+# Topics
+export kafka_customer_topic="cc01_sbq_its_esp_tap3507_customer"
+export kafka_trade_topic="cc01_sb_its_esp_tap3507_trade"
+
+# OAuth / SASL for Kafka
+export oauthbearer_token_endpoint_url="https://fedsit.rastest.tdbank.ca/as/token.oauth2"
+export sub_claim_name="client_id"
+
+# SSL truststore for Kafka clients
+# NOTE: double-backslashes for Java on Windows
+export ssl_truststore_location="C:\\Users\\TAP3507\\certs\\cacerts-updated"
+export ssl_truststore_password="changeit"
+export ssl_truststore_type="JKS"
+
+echo "-> bootstrap_servers     = ${bootstrap_servers}"
+echo "-> kafka_customer_topic  = ${kafka_customer_topic}"
+echo "-> kafka_trade_topic     = ${kafka_trade_topic}"
+echo "-> DATABRICKS_HOST       = ${DATABRICKS_HOST}"
+echo "-> DATABRICKS_HTTP_PATH  = ${DATABRICKS_HTTP_PATH}"
+echo
+
+###############################################
+# 4. Start the Spring Boot app
+###############################################
+
+echo "== Starting Kafka Producer/Consumer =="
+echo "Jar: $JAR_PATH"
+echo
+
+# If you want to ensure Java 17 is used:
+# export JAVA_HOME="/c/Users/TAP3507/tools/java/jdk-17"
+# export PATH="$JAVA_HOME/bin:$PATH"
+
+java -jar "$JAR_PATH"
+EXIT_CODE=$?
+
+echo
+echo "Kafka Producer/Consumer exited with code: $EXIT_CODE"
+exit "$EXIT_CODE"
 ```
 
 ---
 
-## 3️⃣ What you give to other people
+### How to use
 
-Exactly two files:
-
-1. `ui-dist.zip` (your “jar-like” Angular artifact)
+1. Make it executable (in Git Bash or WSL):
     
-2. `start-angular.sh` (the launcher)
-    
-
-They:
 
 ```bash
-./start-angular.sh
+chmod +x start-kafka-producer-consumer.sh
 ```
 
-Script unzips `ui-dist.zip` once and serves the app on `http://localhost:4200`.
-
-If you’d like, next step I can line up **all** your artifacts:
-
-- 3 Spring Boot fat jars + their start scripts
-    
-- Angular `ui-dist.zip` + `start-angular.sh`
+2. Run it from **PowerShell** or **Git Bash**:
     
 
-so you have a clean, consistent story to share.
+```bash
+./start-kafka-producer-consumer.sh
+```
+
+(If you’re in PowerShell, you can run: `bash start-kafka-producer-consumer.sh`.)
+
+3. The script will:
+    
+
+- fetch a fresh Databricks token using your existing CLI login
+    
+- export all the env vars your Spring Boot app expects
+    
+- launch `kafka-producer-consumer-0.0.1-SNAPSHOT.jar`
+    
+
+If you change jar version, warehouse ID, topics, etc., just edit the config section at the top.
+
+If you want similar scripts for your **DeepHaven**, **orchestrator**, or **BI showcase** services, you can use this as a template and we can clone/adjust them.
