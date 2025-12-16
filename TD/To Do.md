@@ -4,12 +4,13 @@
 - Look at Metrics View
 - Try to tune the performance of Streaming Ingestion SDK while doing SCD2-merge
 
-Perfect — thanks for the screenshots. Now I can be **very precise** and tie this directly to _your_ codebase.
+Got it — you **can** keep `ssl.truststore.location: classpath:...` and make it work **without** `KafkaPropertiesCustomizer`.
 
-### Key observation from your screenshots
+The trick is: **don’t let Kafka see `classpath:`**. You resolve it yourself **when building the ConsumerFactory/ProducerFactory** (i.e., you take control of Kafka factories).
 
-You are **NOT** manually building Kafka configs.  
-You are relying on **Spring Boot auto-configuration** via:
+---
+
+## 1) Keep your `application.yml` (classpath stays)
 
 ```yaml
 spring:
@@ -17,198 +18,122 @@ spring:
     consumer:
       properties:
         ssl.truststore.location: classpath:certs/cacerts-updated
+        ssl.truststore.password: changeit
+        ssl.truststore.type: JKS
 ```
 
-and you only **log** properties using:
-
-- `KafkaPropertiesLogger`
-    
-- `ActivePropertiesLogger`
-    
-
-➡️ That means **Kafka client properties are finalized internally by Spring**, not by you.
-
-So the fix must happen **before Kafka client is created**, without introducing a `Map<String,Object>` in your app code.
+(If you also produce, same under `spring.kafka.producer.properties`.)
 
 ---
 
-## ✅ The CORRECT hook for your setup (this is the missing piece)
-
-### Use `KafkaPropertiesCustomizer`
-
-This is _exactly_ what Spring Boot provides for this scenario.
-
-You add **one bean**, and Spring will:
-
-1. Load `application.yml`
-    
-2. Build Kafka properties
-    
-3. Call your customizer
-    
-4. Then create Kafka consumers/producers
-    
-
----
-
-## 🔧 Drop-in Fix (minimal, production-grade)
-
-Create **one new class** (or put in existing config package):
+## 2) Add a resolver utility (classpath → temp file path)
 
 ```java
-@Configuration
-public class KafkaTruststoreClasspathResolver {
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.ResourceLoader;
 
-    @Bean
-    KafkaPropertiesCustomizer truststoreCustomizer(ResourceLoader resourceLoader) {
-        return props -> {
-            Object locObj = props.get("ssl.truststore.location");
-            if (locObj == null) {
-                return;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+
+public final class ClasspathToTempFile {
+    private ClasspathToTempFile() {}
+
+    public static String resolveIfClasspath(String location, ResourceLoader resourceLoader) {
+        if (location == null) return null;
+        if (!location.startsWith("classpath:")) return location;
+
+        try {
+            Resource resource = resourceLoader.getResource(location);
+
+            // If IDE/exploded classes -> can become a real file already
+            if (resource.isFile()) {
+                return resource.getFile().getAbsolutePath();
             }
 
-            String location = locObj.toString();
-
-            // Only handle classpath:
-            if (!location.startsWith("classpath:")) {
-                return;
+            // Fat JAR -> copy out to temp
+            Path tmp = Files.createTempFile("kafka-truststore-", ".jks");
+            try (InputStream in = resource.getInputStream()) {
+                Files.copy(in, tmp, StandardCopyOption.REPLACE_EXISTING);
             }
-
-            try {
-                Resource resource = resourceLoader.getResource(location);
-
-                Path tmp = Files.createTempFile("kafka-truststore-", ".jks");
-                try (InputStream in = resource.getInputStream()) {
-                    Files.copy(in, tmp, StandardCopyOption.REPLACE_EXISTING);
-                }
-
-                tmp.toFile().deleteOnExit();
-
-                props.put("ssl.truststore.location", tmp.toAbsolutePath().toString());
-
-                System.out.println(
-                    "Resolved Kafka truststore from " + location +
-                    " -> " + tmp.toAbsolutePath()
-                );
-
-            } catch (Exception e) {
-                throw new IllegalStateException(
-                    "Failed to resolve Kafka truststore from " + location, e
-                );
-            }
-        };
+            tmp.toFile().deleteOnExit();
+            return tmp.toAbsolutePath().toString();
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to resolve truststore from " + location, e);
+        }
     }
 }
 ```
 
 ---
 
-## ✅ Why this fits YOUR code perfectly
+## 3) Override Kafka’s ConsumerFactory (and ProducerFactory if needed)
 
-✔ You **do not** need:
-
-- `Map<String,Object>`
-    
-- Custom `ConsumerFactory`
-    
-- Custom `ProducerFactory`
-    
-
-✔ You **keep** your existing YAML:
-
-```yaml
-ssl.truststore.location: classpath:certs/cacerts-updated
-```
-
-✔ Works in:
-
-- IntelliJ
-    
-- `java -jar`
-    
-- Docker
-    
-- WEnix (Linux)
-    
-- Windows
-    
-
-✔ Kafka **never** sees `classpath:`  
-It only sees something like:
-
-```
-/tmp/kafka-truststore-1837462819.jks
-```
-
----
-
-## 🔍 Why your current loggers show the problem but don’t fix it
-
-### `ActivePropertiesLogger`
-
-Just prints what Spring loaded  
-➡️ Still shows `classpath:certs/cacerts-updated`
-
-### `KafkaPropertiesLogger`
-
-Prints values _before Kafka client normalization_  
-➡️ Still shows invalid path
-
-🚨 Kafka itself later does:
+Create a config class:
 
 ```java
-Paths.get("classpath:certs/cacerts-updated")
+import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.io.ResourceLoader;
+import org.springframework.kafka.core.*;
+
+import java.util.Map;
+
+@Configuration
+public class KafkaFactoryConfig {
+
+    @Bean
+    public ConsumerFactory<Object, Object> consumerFactory(
+            KafkaProperties kafkaProperties,
+            ResourceLoader resourceLoader
+    ) {
+        Map<String, Object> props = kafkaProperties.buildConsumerProperties(null);
+
+        String loc = (String) props.get("ssl.truststore.location");
+        String resolved = ClasspathToTempFile.resolveIfClasspath(loc, resourceLoader);
+        if (resolved != null) {
+            props.put("ssl.truststore.location", resolved);
+        }
+
+        return new DefaultKafkaConsumerFactory<>(props);
+    }
+
+    // Only if you also produce with SSL:
+    @Bean
+    public ProducerFactory<Object, Object> producerFactory(
+            KafkaProperties kafkaProperties,
+            ResourceLoader resourceLoader
+    ) {
+        Map<String, Object> props = kafkaProperties.buildProducerProperties(null);
+
+        String loc = (String) props.get("ssl.truststore.location");
+        String resolved = ClasspathToTempFile.resolveIfClasspath(loc, resourceLoader);
+        if (resolved != null) {
+            props.put("ssl.truststore.location", resolved);
+        }
+
+        return new DefaultKafkaProducerFactory<>(props);
+    }
+
+    @Bean
+    public KafkaTemplate<Object, Object> kafkaTemplate(ProducerFactory<Object, Object> pf) {
+        return new KafkaTemplate<>(pf);
+    }
+}
 ```
 
-💥 `InvalidPathException`
+✅ Now Kafka only ever receives a real path like `C:\Users\...\AppData\Local\Temp\kafka-truststore-xyz.jks` (Windows) or `/tmp/...` (Docker/Linux).  
+✅ You keep **classpath** in YAML.  
+✅ No `KafkaPropertiesCustomizer`.
 
 ---
 
-## 🧠 Mental model (important)
+### Important note
 
-|Layer|Understands `classpath:`?|
-|---|---|
-|Spring Environment|✅ YES|
-|ResourceLoader|✅ YES|
-|Kafka Client|❌ NO|
-|JVM NIO Paths|❌ NO|
-
-So we **translate** at the boundary.
+If you already have a custom `ConcurrentKafkaListenerContainerFactory`, make sure it uses this `consumerFactory()` bean (Spring will auto-wire it if bean names/types match).
 
 ---
 
-## ⭐ Recommended final YAML (SDK-friendly)
-
-```yaml
-spring:
-  kafka:
-    consumer:
-      properties:
-        ssl.truststore.location: ${SSL_TRUSTSTORE_LOCATION:classpath:certs/cacerts-updated}
-        ssl.truststore.password: ${SSL_TRUSTSTORE_PASSWORD:changeit}
-        ssl.truststore.type: JKS
-```
-
-Then:
-
-- Local → classpath
-    
-- Docker → mount `/opt/app/certs/cacerts-updated` and set env var
-    
-
----
-
-## If you want next
-
-I can:
-
-- Refactor this into a **reusable SDK module**
-    
-- Add **unit test** validating classpath → temp resolution
-    
-- Add **Confluence-ready explanation** (1 page)
-    
-- Show how to **disable it for producers only / consumers only**
-    
-
-You’re on the right track — this is a _classic_ enterprise Kafka + Docker issue, and your setup is now cleanly fixable.
+If you show me whether you have any existing Kafka config class (or if you only rely on `@KafkaListener` defaults), I’ll tell you exactly where to paste this so it doesn’t conflict with anything else.
