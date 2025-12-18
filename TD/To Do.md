@@ -4,173 +4,114 @@
 - Look at Metrics View
 - Try to tune the performance of Streaming Ingestion SDK while doing SCD2-merge
 
-Great, this screenshot shows the **last blocking issue very clearly**.  
-You’re _almost_ done with the downgrade — this is now a **version alignment problem**, not a conceptual one.
+Yep — this new screenshot shows **why your `npm install @angular/cdk@16.2.14` still fails**:
+
+✅ You _think_ you’re on Angular 16…  
+❌ but your project is currently still pinned to **Angular 20**:
+
+```
+Found: @angular/common@20.3.0
+"@angular/common@20.3.0" from the root project
+```
+
+So right now your `package.json` (or an existing lock/partial install) still has:
+
+- `@angular/common: 20.3.0` (and likely other `@angular/*` at 20.x)
+    
+
+That’s why CDK 16 refuses — it expects Angular 16/17.
 
 ---
 
-## What the error really says (decoded)
+# Fix (do it in the right order)
 
-Key parts from the screenshot:
+## 1) Hard reset (again) — because the repo is in a mixed state
 
-```
-Could not resolve dependency:
-dev @angular-devkit/build-angular@16.2.16
-peer @angular/compiler-cli "^16.0.0"
-```
-
-But earlier in the same output:
-
-```
-Found: @angular/compiler-cli@16.2.16
-node_modules/@angular/compiler-cli
-```
-
-So at first glance this looks fine… **but** npm is still failing because:
-
-### 🔴 You still have a mismatched Angular dependency somewhere
-
-Most commonly one of these is true:
-
-1. ❌ Some `@angular/*` package is **not** at `16.2.16`
-    
-2. ❌ `typescript` version is incompatible
-    
-3. ❌ A leftover Vite / AnalogJS package is still pulling newer Angular peers
-    
-4. ❌ `package-lock.json` still contains newer Angular metadata
-    
-
----
-
-## The rule for Angular downgrades (important)
-
-**ALL** Angular packages must be on the **same minor version**.
-
-That means:
-
-```
-@angular/*            → 16.2.16 (all of them)
-@angular-devkit/*     → 16.2.16
-@angular/compiler-cli → 16.2.16
-typescript            → 5.1.6
-```
-
-Even **one** straggler will break `npm install`.
-
----
-
-## Do this EXACTLY (clean reset, no guessing)
-
-### 1️⃣ Remove all build artifacts and lockfiles
+Run this from the project root:
 
 ```bash
 rm -rf node_modules package-lock.json .angular
 ```
 
----
-
-### 2️⃣ Force-install a fully aligned Angular 16 toolchain
-
-Run this **as one command**:
-
-```bash
-npm install \
-  @angular/cli@16.2.16 \
-  @angular/compiler@16.2.16 \
-  @angular/compiler-cli@16.2.16 \
-  @angular/core@16.2.16 \
-  @angular/common@16.2.16 \
-  @angular/platform-browser@16.2.16 \
-  @angular/platform-browser-dynamic@16.2.16 \
-  @angular/router@16.2.16 \
-  @angular/forms@16.2.16 \
-  @angular/animations@16.2.16 \
-  @angular-devkit/build-angular@16.2.16 \
-  @angular-devkit/core@16.2.16 \
-  @angular-devkit/schematics@16.2.16 \
-  rxjs@7.8.1 \
-  zone.js@0.13.3 \
-  typescript@5.1.6
-```
-
-This **overwrites everything** consistently.
+(You already did earlier, but do it again now because installs have partially happened.)
 
 ---
 
-### 3️⃣ Remove any remaining Vite / AnalogJS (must be zero)
+## 2) Force Angular 16 FIRST (core packages)
 
 Run:
 
 ```bash
-npm ls | grep -E "vite|analog"
+npm install \
+  @angular/core@16.2.16 \
+  @angular/common@16.2.16 \
+  @angular/compiler@16.2.16 \
+  @angular/platform-browser@16.2.16 \
+  @angular/platform-browser-dynamic@16.2.16 \
+  @angular/router@16.2.16 \
+  @angular/forms@16.2.16 \
+  @angular/animations@16.2.16
 ```
 
-If **anything** shows up, remove it:
+This step is critical: it removes the `20.3.0` pins.
+
+---
+
+## 3) Then install Angular CLI + build tooling (still 16)
 
 ```bash
-npm remove @analogjs/vite-plugin-angular analogjs vite
+npm install -D \
+  @angular/cli@16.2.16 \
+  @angular/compiler-cli@16.2.16 \
+  @angular-devkit/build-angular@16.2.16 \
+  typescript@5.1.6
 ```
-
-Then repeat step 1 + 2.
 
 ---
 
-### 4️⃣ Verify versions (before building)
+## 4) Then install CDK/Material for Angular 16
 
 ```bash
-npx ng version
+npm install @angular/cdk@16.2.14
+# if you use material:
+npm install @angular/material@16.2.14
 ```
-
-You **must** see:
-
-- Angular: **16.2.16**
-    
-- TypeScript: **5.1.6**
-    
-- Node: **18.16.1**
-    
-
-If yes → proceed.
 
 ---
 
-### 5️⃣ Build
+## 5) Finally run a clean install to lock everything
 
 ```bash
-npx ng build
+rm -rf node_modules package-lock.json
+npm install
 ```
 
-This **will work** once everything is aligned.
+---
+
+# Most likely you have these lines in package.json (you must change them)
+
+Search in `package.json` for any `@angular/*` showing 20.x:
+
+```bash
+cat package.json | grep -E "\"@angular/" -n
+```
+
+If you see stuff like:
+
+```json
+"@angular/common": "20.3.0"
+"@angular/core": "20.3.0"
+"@angular/cdk": "^20.2.7"
+```
+
+Change all of them to **16.2.x**.
 
 ---
 
-## Why this error kept looping
+## Why your earlier “big install” didn’t stick
 
-You were doing the right thing, but npm is strict:
-
-- Angular 16 **does not tolerate mixed minors**
-    
-- Vite / AnalogJS **silently pulls Angular 18+ peers**
-    
-- One leftover dep poisons the tree
-    
-
-Now you’re fixing it the **correct, deterministic way**.
+Because you probably still have **some `@angular/*` pinned to 20.x in package.json**, and npm will honor the root project pins first.
 
 ---
 
-## After this
-
-Once `ng build` works locally on Node 18, your **Dockerfile with `ubi8/nodejs-18` will work unchanged**.
-
-If you want, next I can:
-
-- Sanity-check your `package.json`
-    
-- Clean your `angular.json` (builders, SSR leftovers)
-    
-- Finalize the Dockerfile for Nexus + Node 18
-    
-
-You’re in the final stretch 👍
+If you paste just your `package.json` `dependencies` section (only the `@angular/*` lines are enough), I’ll tell you the exact edits so it’s consistent in one shot.
