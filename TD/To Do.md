@@ -4,164 +4,119 @@
 - Look at Metrics View
 - Try to tune the performance of Streaming Ingestion SDK while doing SCD2-merge
 
-Got it — thanks for the screenshot. This error is **NOT about Node tarball anymore** 👍  
-Your Node setup is actually working fine.
+Nice — you fixed the port mapping. ✅  
+Now you’re getting **403 Forbidden**, which means:
+
+- Nginx **is reachable**
+    
+- But it’s **not allowed to serve the directory / files** you copied (permissions / SELinux labeling / wrong doc root)
+    
+
+On **UBI nginx**, this is super common because it runs as a non-root user and expects content under specific paths/permissions.
 
 ---
 
-## 🔴 What is really failing?
+## What’s causing 403 in your case
 
-From your log:
+Most likely **your Angular files in `/usr/share/nginx/html` are not readable by the nginx user** (or nginx is serving a different root, like `/opt/app-root/src`).
 
-```
-Inlining of fonts failed.
-An error has occurred while retrieving
-https://fonts.googleapis.com/css2?family=Roboto
-SELF_SIGNED_CERT_IN_CHAIN
-```
-
-### ✅ Root cause
-
-You are building Angular **inside Docker**, and during `ng build` Angular tries to:
-
-➡️ Download Google Fonts  
-➡️ Over HTTPS  
-➡️ Docker container does **not trust your corporate SSL certificate**
-
-So the build fails.
-
-This is **very common in corporate/WEnix environments**.
+Also your `docker ps` shows exposed ports `8080/tcp, 8443/tcp` which matches UBI nginx defaults.
 
 ---
 
-## 🧠 Why this happens specifically during Angular build
+## Step 1 — confirm what root nginx is serving
 
-Angular CLI does **font inlining** by default:
+Run:
 
-- It fetches Google Fonts
-    
-- Embeds them into the final CSS
-    
-- Requires outbound HTTPS access
-    
+```bash
+docker exec -it thales-edge-ui sh -c "grep -R \"root \" -n /etc/nginx/nginx.conf /etc/nginx/conf.d 2>/dev/null | head -50"
+```
 
-Your Docker container:
+If it shows something like:
 
-- Has no corporate root CA
+- `root /usr/share/nginx/html;` → then it’s **permissions**
     
-- Sees Google Fonts cert chain as invalid
-    
-- Fails with `SELF_SIGNED_CERT_IN_CHAIN`
+- `root /opt/app-root/src;` (or similar) → then your COPY path is wrong for UBI nginx
     
 
 ---
 
-## ✅ FIX OPTION 1 (Best & Cleanest): Disable font inlining
+## Step 2 — check if index.html exists where nginx expects
 
-### Modify `angular.json`
+First check both places:
 
-Find:
-
-```json
-"build": {
-  "options": {
+```bash
+docker exec -it thales-edge-ui sh -c "ls -la /usr/share/nginx/html | head -30"
+docker exec -it thales-edge-ui sh -c "ls -la /opt/app-root/src 2>/dev/null | head -30"
 ```
 
-Add:
-
-```json
-"inlineFonts": false
-```
-
-### Example:
-
-```json
-"options": {
-  "outputPath": "dist/app",
-  "index": "src/index.html",
-  "main": "src/main.ts",
-  "polyfills": ["zone.js"],
-  "tsConfig": "tsconfig.app.json",
-  "inlineFonts": false
-}
-```
-
-✅ No HTTPS calls  
-✅ No cert issues  
-✅ Fastest fix  
-✅ Recommended for Docker builds
+You should see `index.html` in the actual root folder.
 
 ---
 
-## ✅ FIX OPTION 2: Use local fonts (Production-grade)
+## Fix option A (recommended): copy into UBI nginx expected web root + correct permissions
 
-### Step 1: Download Roboto once
+Many UBI nginx images expect content in:
 
-Download `.woff2` files (outside Docker).
+✅ `/opt/app-root/src`
 
-### Step 2: Put in:
-
-```
-src/assets/fonts/
-```
-
-### Step 3: Use local CSS
-
-```css
-@font-face {
-  font-family: 'Roboto';
-  src: url('/assets/fonts/roboto.woff2') format('woff2');
-}
-```
-
-Remove Google Fonts `<link>` from `index.html`.
-
-✅ Fully offline  
-✅ Enterprise-safe
-
----
-
-## ⚠️ NOT Recommended but works (Temporary)
-
-Disable SSL verification:
+So update runtime stage to:
 
 ```dockerfile
-ENV NODE_TLS_REJECT_UNAUTHORIZED=0
+FROM registry.access.redhat.com/ubi8/nginx-120
+
+COPY --from=build /app/dist/thales-edge/browser/ /opt/app-root/src/
+
+USER root
+RUN chmod -R g+rwX /opt/app-root/src && chgrp -R 0 /opt/app-root/src
+USER 1001
 ```
 
-🚫 Security risk  
-🚫 Should not go to production
+Then rebuild + run:
+
+```bash
+docker build -t thales-edge-ui .
+docker rm -f thales-edge-ui
+docker run -d -p 8080:8080 --name thales-edge-ui thales-edge-ui
+```
 
 ---
 
-## 🟢 Your Node tarball setup is OK
+## Fix option B: keep `/usr/share/nginx/html` but set permissions
 
-From your Dockerfile:
+If nginx root really is `/usr/share/nginx/html`, then do:
 
 ```dockerfile
-COPY node-v20.19.0-linux-x64.tar.xz /opt/
-RUN tar -xf ...
+COPY --from=build /app/dist/thales-edge/browser/ /usr/share/nginx/html/
+
+USER root
+RUN chmod -R a+rX /usr/share/nginx/html
+USER 1001
 ```
 
-✅ Correct  
-✅ Node is available  
-✅ npm runs fine
-
-The failure happens **later during Angular build**, not Node install.
+(UBI images often run as `1001`, not `nginx`.)
 
 ---
 
-## 🏁 Final Recommendation (What you should do)
+## Why “403” specifically?
 
-✔ Disable `inlineFonts`  
-✔ Rebuild Docker image  
-✔ Keep Node tarball approach
+403 on nginx static hosting usually happens when:
 
-If you want, paste:
-
-- `angular.json`
+- directory has no execute bit for traversal (`x`)
     
-- Dockerfile
+- files aren’t readable by the running user
+    
+- nginx has no `index` file or autoindex disabled (but then usually you see 403 too)
     
 
-I’ll give you a **fully hardened Dockerfile** for WEnix / corporate SSL environments.
+So permissions/root-path are the key.
+
+---
+
+### Do this one command and paste output (it will pinpoint instantly)
+
+```bash
+docker exec -it thales-edge-ui sh -c "nginx -T 2>/dev/null | sed -n '1,160p'"
+```
+
+From that I’ll tell you exactly which root path it’s using and which of the two fixes above is the right one.
