@@ -3,102 +3,115 @@
 - Move the upsert logic from Angular to DeepHaven
 - Look at Metrics View
 - Try to tune the performance of Streaming Ingestion SDK while doing SCD2-merge
-Nice — the important part is: **it actually started successfully**. In your screenshot I can see:
+Got it — **this time it’s not a “can’t connect” problem**. The container is **actually dying**.
 
-- “Starting Deephaven server…”
+In your screenshots:
+
+- Deephaven prints: `Server started on port 10000` and `Press Control-C to exit`
     
-- “Server started on port 10000”
+- Then immediately: **`Aborted!`**
     
-- “Deephaven is running at [http://0.0.0.0:10000/?psk=…”](http://0.0.0.0:10000/?psk=%E2%80%A6%E2%80%9D)
+- After that, `curl` fails (because there’s nothing listening)
     
-- Then it shows **“Aborted”**
+- And `docker exec ...` says container is not running
     
 
-That “Aborted” is almost never Deephaven crashing by itself — it usually means **your terminal sent an interrupt / the parent shell got killed**, or Docker got stopped (Ctrl+C / session ended / WSL terminal closed / etc.). Deephaven was running fine up to that point.
-
-### 1) Run it in detached mode so it doesn’t die when you close the terminal
-
-```bash
-docker run -d --name deephaven \
-  -p 10000:10000 \
-  deephaven-local:1.1.0
-```
-
-Check it’s running:
-
-```bash
-docker ps | grep deephaven
-docker logs -f deephaven
-```
-
-Stop it when you want:
-
-```bash
-docker stop deephaven
-```
+So we need to find **why the Deephaven process is exiting with SIGABRT**.
 
 ---
 
-### 2) If you _need_ the PSK, don’t rely on the auto-generated `?psk=...`
+## 1) Check the real exit reason (this will tell us what happened)
 
-Auto PSK is annoying because it changes each run. Make it stable:
-
-```bash
-docker run -d --name deephaven \
-  -p 10000:10000 \
-  -e DEEPHAVEN_AUTH_TYPE=psk \
-  -e DEEPHAVEN_PSK="my-fixed-psk-123" \
-  deephaven-local:1.1.0
-```
-
-Then you always use the same PSK in:
-
-- Angular env
-    
-- backend `application.yml`
-    
-
----
-
-### 3) Confirm it’s reachable
-
-From the WEnix host:
-
-```bash
-curl -I http://localhost:10000/ | head
-```
-
-From your Windows browser (if needed):
-
-- `http://<wenix-hostname-or-ip>:10000/ide`
-    
-
-If Windows can’t reach it, it’s firewall/routing, not Deephaven.
-
----
-
-### 4) Why you saw “Aborted”
-
-Most common causes:
-
-- You pressed **Ctrl+C**
-    
-- Terminal session disconnected
-    
-- WSL shell closed / crashed
-    
-- Docker daemon restarted
-    
-
-Running detached (`-d`) avoids all of these.
-
----
-
-If you run it detached and it still stops, send me:
+Run:
 
 ```bash
 docker ps -a | grep deephaven
+docker inspect deephaven --format='ExitCode={{.State.ExitCode}} OOMKilled={{.State.OOMKilled}} Error={{.State.Error}} FinishedAt={{.State.FinishedAt}}'
+```
+
+**Interpretation**
+
+- `OOMKilled=true` → it’s memory; we fix by increasing memory/shm
+    
+- `ExitCode=134` → classic SIGABRT (native/JVM abort). We need crash logs.
+    
+
+---
+
+## 2) Get the last logs right before it aborts
+
+```bash
 docker logs deephaven --tail 200
 ```
 
-and I’ll pinpoint the real abort reason.
+(If the container is gone, rerun it, wait for it to abort, then run the above.)
+
+---
+
+## 3) Run it detached and capture JVM crash logs to a folder
+
+This makes debugging deterministic:
+
+```bash
+mkdir -p /shared-resources/deephaven-crash
+
+docker rm -f deephaven 2>/dev/null || true
+
+docker run -d --name deephaven \
+  -p 10000:10000 \
+  --shm-size=1g \
+  -e DEEPHAVEN_AUTH_TYPE=psk \
+  -e DEEPHAVEN_PSK=my-fixed-psk \
+  -e JAVA_TOOL_OPTIONS='-XX:ErrorFile=/tmp/hs_err_pid%p.log -XX:HeapDumpPath=/tmp' \
+  -v /shared-resources/deephaven-crash:/tmp \
+  deephaven-local:1.1.0
+```
+
+Then watch:
+
+```bash
+docker logs -f deephaven
+```
+
+If it aborts, check for crash files:
+
+```bash
+ls -lh /shared-resources/deephaven-crash | head
+```
+
+You’ll likely see `hs_err_pid*.log` (JVM fatal error report). That file will tell us the exact cause.
+
+---
+
+## 4) Quick sanity: confirm it ever listens before dying
+
+Right after starting it (while it’s still “Up”):
+
+```bash
+docker exec -it deephaven bash -lc "ss -lntp | grep 10000 || true"
+```
+
+---
+
+### Most common causes of this exact “Aborted!” pattern in containers
+
+- **JVM native crash** (hs_err log will confirm)
+    
+- **Shared memory too small** (`--shm-size=1g` often fixes)
+    
+- **Resource limits / cgroup memory pressure** (inspect will show OOMKilled)
+    
+
+---
+
+### Send me these 2 outputs and I’ll tell you the exact fix
+
+```bash
+docker inspect deephaven --format='ExitCode={{.State.ExitCode}} OOMKilled={{.State.OOMKilled}} Error={{.State.Error}}'
+```
+
+```bash
+docker logs deephaven --tail 200
+```
+
+If an `hs_err_pid*.log` file appears, paste the **top ~30 lines** of it (that section contains the smoking gun).
