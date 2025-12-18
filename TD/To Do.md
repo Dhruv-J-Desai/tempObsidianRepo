@@ -4,113 +4,108 @@
 - Look at Metrics View
 - Try to tune the performance of Streaming Ingestion SDK while doing SCD2-merge
 
-Nice — this screenshot explains everything.
+You’re **very close**. That screenshot shows **two different issues**:
 
-### What I see
+## 1) PowerShell error about `package-lock.json` not found
 
-- `npm config get registry` ✅ is **TD Nexus**:  
-    `https://repo.td.com/repository/3rd-party-npm-central`
+That’s fine — it just means you **don’t have a `package-lock.json`** in this repo. Ignore it.
+
+## 2) You ran the flag wrong once
+
+You typed:
+
+- `npm install ==legacy-peer-deps` ❌ (double `==` makes npm think it’s a package name)
     
-- But in your `npm config list -l` you also have:
+
+Correct is:
+
+- `npm install --legacy-peer-deps` ✅
     
-    - `strict-ssl = false` (fine for corp, but not ideal)
-        
-    - `cafile = null`
-        
-    - and **no project `.npmrc`**
-        
 
-So installs are fully driven by **global/user config**, and if Nexus doesn’t have some packages/versions (or blocks optional deps), npm resolution can behave weirdly and you end up with `@angular/common@undefined` during dependency tree resolution.
+(You did run the correct one after, so good.)
 
----
+## 3) Real blocker: `ETARGET No matching version found for @angular/animations@16.2.16`
 
-## Do this: set a project-level `.npmrc` (so Docker + teammates are consistent)
+This is almost always because **your registry/proxy doesn’t have that exact package version** (or it’s pointing to the wrong repo).
 
-Create a `.npmrc` in your repo root (same folder as `package.json`):
+From your earlier screenshot, your registry is:
 
-```bash
-cat > .npmrc <<'EOF'
-registry=https://repo.td.com/repository/3rd-party-npm-central/
+- `https://repo.td.com/repository/3rd-party-npm-central`
+    
+
+That repo might not host **all** Angular patch versions.
+
+### Fix: point this project to the “all” npm repo (the one that contains everything)
+
+Create a **project-local** `.npmrc` in the repo root (`thales-edge/.npmrc`) with:
+
+```ini
+registry=https://repo.td.com/repository/tds-npm-all-release/
 always-auth=true
 strict-ssl=false
-EOF
 ```
 
-Now confirm:
+Then run:
 
-```bash
+```powershell
 npm config get registry
-npm config get userconfig
-npm config get globalconfig
 ```
 
----
+Make sure it prints `tds-npm-all-release` (not `3rd-party-npm-central`).
 
-## Next: your real blocker right now is NOT registry — it’s Angular version mismatch
+Now clean + install:
 
-Your `package.json` shows Angular core packages at **16.2.16**, but earlier you had **CDK/Material 20.x** (or you temporarily installed it).  
-That causes the exact error you’re seeing:
-
-- `@angular/cdk@16.2.14` wants Angular `^16 || ^17`
-    
-- but your root had `@angular/common@20.3.0` at one point (your screenshot shows that conflict)
-    
-
-### Fix: force ALL Angular + CDK + Material to 16.2.x
-
-Run this (copy-paste):
-
-```bash
-rm -rf node_modules package-lock.json
+```powershell
+Remove-Item -Recurse -Force node_modules -ErrorAction SilentlyContinue
+Remove-Item -Force package-lock.json -ErrorAction SilentlyContinue
 npm cache clean --force
-
-npm i \
-  @angular/animations@16.2.16 \
-  @angular/common@16.2.16 \
-  @angular/compiler@16.2.16 \
-  @angular/core@16.2.16 \
-  @angular/forms@16.2.16 \
-  @angular/platform-browser@16.2.16 \
-  @angular/platform-browser-dynamic@16.2.16 \
-  @angular/router@16.2.16 \
-  @angular/cli@16.2.16 \
-  @angular/compiler-cli@16.2.16 \
-  @angular-devkit/build-angular@16.2.16 \
-  @angular/cdk@16.2.14 \
-  @angular/material@16.2.14 \
-  --save --save-exact
-```
-
-Then:
-
-```bash
 npm install --legacy-peer-deps
 ```
 
 ---
 
-## About “downgrading to Node 18”
+## If you still get `No matching version found`
 
-You already _are_ on Node 18 locally (`gular-node18` prompt).  
-But remember: **Angular 20+ requires Node 20.19+**, so if you truly want to stay on Node 18, you must keep Angular around **16/17/18** (your current target is Angular 16, which is fine).
+Then your Nexus repo truly doesn’t have `16.2.16`.
 
----
+Two ways out:
 
-## If Docker build is the goal
+### Option A (best): use an Angular patch version that **exists** in your Nexus
 
-Use a Node 18 base image in Docker, but **don’t use Angular 20** in that container.
+Try installing `16.2.0` or `16.2.14` everywhere (keep all Angular packages same patch):
 
-Example:
+In `package.json`, set all `@angular/*` to **16.2.14** (or one patch you know exists), including:
 
-```dockerfile
-FROM node:18-alpine AS build
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci --legacy-peer-deps
-COPY . .
-RUN npm run build
+- `@angular/animations`, `common`, `compiler`, `core`, `forms`, `platform-browser`, `platform-browser-dynamic`, `router`
+    
+- dev deps: `@angular/cli`, `@angular/compiler-cli`, `@angular-devkit/build-angular`
+    
+
+Then:
+
+```powershell
+npm install --legacy-peer-deps
 ```
 
+### Option B: temporarily use public npmjs (if policy allows)
+
+Only if permitted in your environment.
+
 ---
 
-If you paste your **full `dependencies` + `devDependencies`** blocks (text), I can tell you exactly which packages are still pulling Angular 20+ and give you the exact pin-set to make it clean.
+### One quick check (to confirm repo has that version)
+
+Run:
+
+```powershell
+npm view @angular/animations versions --json
+```
+
+If your registry is correct, this will return a big list. If `16.2.16` is not in that list, your Nexus doesn’t have it.
+
+If you paste the output of:
+
+- `npm config get registry`
+    
+- `npm view @angular/animations version`  
+    I can tell you immediately whether it’s a **registry** issue or a **package version availability** issue.
