@@ -3,136 +3,92 @@
 - Move the upsert logic from Angular to DeepHaven
 - Look at Metrics View
 - Try to tune the performance of Streaming Ingestion SDK while doing SCD2-merge
-Got it — and the good news is: you can keep **exactly the same workflow** (PSK + allowed origins + port) in your **Docker-on-WEnix** setup. You’ll just express those “environment + run deephaven” steps as **container env vars + docker run args** (or a wrapper script).
+Yep — this screenshot shows you _fixed the caching_, but now we learned something new:
 
-### 1) The equivalent of “activate venv + export env + run deephaven”
+> The file **`/usr/local/bin/deephaven-server` does not exist** in your image.
 
-In Docker, you don’t “activate”; you pass env vars to the container.
+So the issue is **not Docker anymore** — it’s that the CLI executable name/path you’re trying to run isn’t what got installed.
 
-Run like this:
+Also, based on your Windows workflow (`deephaven server --port 10000`), the CLI you actually want is usually **`deephaven`**, not `deephaven-server`.
 
-```bash
-docker run --rm --name deephaven \
-  -p 10000:10000 \
-  -e DEEPHAVEN_AUTH_TYPE=psk \
-  -e DEEPHAVEN_PSK="your-psk-here" \
-  -e DEEPHAVEN_SERVER_ALLOWED_ORIGINS="http://localhost:4200,http://127.0.0.1:4200" \
-  -e DEEPHAVEN_DATA_DIR=/data \
-  -e DEEPHAVEN_CACHE_DIR=/cache \
-  -e DEEPHAVEN_CONFIG_DIR=/config \
-  -v deephaven-data:/data \
-  -v deephaven-cache:/cache \
-  -v deephaven-config:/config \
-  deephaven-local:1.0
-```
-
-That covers what you were doing on Windows with:
-
-- `DEEPHAVEN_AUTH_TYPE=psk`
-    
-- allowed origins for Angular
-    
-- data/cache/config dirs
-    
-
-> If your Angular is not running on the same host as the container, replace `localhost` with the actual host/IP you access from.
+Let’s confirm what got installed inside the image, then set the right `CMD`.
 
 ---
 
-### 2) “Get the PSK”
+## 1) Inspect inside the image (override entrypoint so it can start)
 
-In Docker you have two options:
-
-**Option A (recommended): you choose the PSK**  
-Just set it yourself (`DEEPHAVEN_PSK="..."`) and reuse it in:
-
-- Angular `.env` / environment.ts
-    
-- backend `application.yml`
-    
-
-**Option B: generate a PSK and print it**  
-If you want the same “print PSK and copy paste” flow, do it outside the container once:
+Run this (it bypasses your failing CMD):
 
 ```bash
-openssl rand -hex 16
+docker run --rm -it --entrypoint bash deephaven-local:1.0 -lc '
+set -e
+echo "== pip packages ==";
+python3.9 -m pip list | grep -i deephaven || true;
+
+echo "== which commands ==";
+command -v deephaven || true;
+command -v deephaven-server || true;
+
+echo "== list /usr/local/bin ==";
+ls -l /usr/local/bin | grep -i deephaven || true;
+
+echo "== list /usr/bin ==";
+ls -l /usr/bin | grep -i deephaven || true;
+'
 ```
 
-Then pass that value as `DEEPHAVEN_PSK`.
+### What you’re looking for:
 
-(Containers shouldn’t auto-generate secrets unless you store them somewhere.)
-
----
-
-### 3) Backend + Frontend config stays the same idea
-
-You were doing:
-
-- Start Deephaven → get PSK
+- If you see `/usr/local/bin/deephaven` (or `/usr/bin/deephaven`) → that’s the command to run.
     
-- Put PSK into UI env + backend yml
-    
-
-You’ll still do that, except now Deephaven PSK is **controlled by docker run** (or compose), so it’s stable and shareable.
-
-Example backend (Spring) idea:
-
-```yaml
-deephaven:
-  url: http://<wenix-host>:10000
-  psk: ${DEEPHAVEN_PSK}
-```
-
-Example Angular idea:
-
-- `DEEPhAVEN_URL=http://<wenix-host>:10000`
-    
-- `DEEPhAVEN_PSK=...`
+- If you see `deephaven-server` somewhere else → we’ll use that exact path.
     
 
 ---
 
-### 4) One important gotcha: “allowed origins”
+## 2) Most likely fix: run `deephaven server`
 
-If your Angular is served from **another port** (say 4200) and Deephaven is on 10000, the origin must match exactly.
+If the command exists as `deephaven`, update your Dockerfile to:
 
-If you access the UI using a hostname (not localhost), include that too:
+```dockerfile
+CMD ["deephaven", "server", "--port", "10000"]
+```
+
+Then rebuild + run:
 
 ```bash
--e DEEPHAVEN_SERVER_ALLOWED_ORIGINS="http://localhost:4200,http://127.0.0.1:4200,http://<wenix-host>:4200"
+docker build --no-cache -t deephaven-local:2.0 .
+docker run --rm -p 10000:10000 deephaven-local:2.0
 ```
 
 ---
 
-### 5) If you want the cleanest “Windows-like” flow: make a `start-deephaven.sh`
+## 3) If `deephaven` is not found either
 
-Create `start-deephaven.sh` in WEnix:
+Then your offline wheels likely installed only part of what you used on Windows.
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
+In that case, rebuild your wheels including the UI/server tooling you used before (you mentioned these in your notes):
 
-export DEEPHAVEN_PSK="${DEEPHAVEN_PSK:-$(openssl rand -hex 16)}"
-echo "DEEPHAVEN_PSK=$DEEPHAVEN_PSK"
+- `deephaven-server[kafka]`
+    
+- `deephaven-plugin-ui`
+    
 
-docker run --rm --name deephaven \
-  -p 10000:10000 \
-  -e DEEPHAVEN_AUTH_TYPE=psk \
-  -e DEEPHAVEN_PSK="$DEEPHAVEN_PSK" \
-  -e DEEPHAVEN_SERVER_ALLOWED_ORIGINS="http://localhost:4200,http://127.0.0.1:4200" \
-  -v deephaven-data:/data \
-  deephaven-local:1.0
-```
-
-Then you run:
+So regenerate wheels (on the machine where you can download):
 
 ```bash
-chmod +x start-deephaven.sh
-./start-deephaven.sh
+rm -rf wheels && mkdir wheels
+pip download "deephaven-server[kafka]" "deephaven-plugin-ui" \
+  --dest wheels \
+  --platform manylinux2014_x86_64 \
+  --python-version 39 \
+  --only-binary=:all: \
+  --implementation cp \
+  --abi cp39
 ```
 
-It prints the PSK like you’re used to.
+Copy to WEnix, rebuild, then re-check with step (1).
 
 ---
 
-If you tell me what **exactly** your backend uses to talk to Deephaven (REST? websocket? deephaven-java-client? python client?), I’ll map the exact config keys/headers you should set so the PSK is used correctly end-to-end.
+Send me the output of the command in step **(1)** (just the few lines showing `command -v` and the `ls | grep` results) and I’ll tell you the exact final `CMD` line to use.
