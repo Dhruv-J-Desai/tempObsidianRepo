@@ -3,141 +3,89 @@
 - Move the upsert logic from Angular to DeepHaven
 - Look at Metrics View
 - Try to tune the performance of Streaming Ingestion SDK while doing SCD2-merge
+Nice — from here it’s just **build → run → verify**, with one small gotcha: your `pip download ...` command must include **all dependencies**, not just the top package name.
 
-Short answer: **Yes, you _can_** — but **not as-is**.  
-`registry.access.redhat.com/ubi8/ubi` is a **minimal RHEL base**, so you must install **Python + system deps yourself** before Deephaven will work.
+### 1) Make sure your `wheels/` folder has deps too
 
-Below is the **correct, enterprise-safe way** to do it.
-
----
-
-## Why `ubi8/ubi` needs extra steps
-
-- UBI **does NOT include Python**
-    
-- No `pip`, no `venv`
-    
-- Deephaven needs:
-    
-    - Python 3.9/3.10
-        
-    - `pip`
-        
-    - native libs (glibc, openssl, libstdc++, etc.)
-        
-
-So we bootstrap Python using **dnf**.
-
----
-
-## ✅ Recommended Dockerfile (UBI 8 + offline wheels)
-
-```dockerfile
-FROM registry.access.redhat.com/ubi8/ubi
-
-# ---- System packages ----
-RUN dnf install -y \
-      python39 \
-      python39-pip \
-      gcc \
-      gcc-c++ \
-      make \
-      libstdc++ \
-      glibc-langpack-en \
-      openssl \
-    && dnf clean all
-
-# Make python/pip available as "python" and "pip"
-RUN alternatives --set python /usr/bin/python3.9 \
- && alternatives --set pip /usr/bin/pip3.9
-
-# ---- App setup ----
-WORKDIR /app
-COPY wheels/ /wheels/
-
-RUN pip install --no-index --find-links=/wheels deephaven-server
-
-EXPOSE 10000
-
-CMD ["python", "-m", "deephaven_server"]
-```
-
----
-
-## 🔑 Important notes (read this)
-
-### 1) Wheels must be **Linux wheels**
-
-When you download wheels on Windows, make sure they are **manylinux** wheels, not Windows ones.
-
-Best practice:
+In the folder that contains your Dockerfile, re-run the download with deps included (and pin pip to avoid surprises):
 
 ```bash
+rm -rf wheels
+mkdir wheels
+
 pip download deephaven-server \
+  --dest wheels \
   --platform manylinux2014_x86_64 \
   --python-version 39 \
   --only-binary=:all: \
-  -d wheels
+  --implementation cp \
+  --abi cp39 \
+  --prefer-binary
 ```
 
-Do this on **any machine that has internet** (Windows is fine).
+If this pulls a lot of wheels, that’s good — it means deps are included.
 
 ---
 
-### 2) If build fails on native deps
+### 2) Build the Docker image (in WEnix)
 
-If you see errors like:
+From the same folder as the Dockerfile:
 
-- `gcc not found`
-    
-- `cannot find -lstdc++`
-    
-- `libssl.so not found`
-    
+```bash
+docker build -t deephaven-local:1.0 .
+```
 
-Just add the missing package via `dnf install`.
-
-UBI is enterprise-friendly but intentionally minimal.
+If the build fails, copy the **first error block** (usually it’ll say which dependency is missing).
 
 ---
 
-## 🟢 Why UBI is a GOOD choice in your org
+### 3) Run it
 
-- Approved RedHat registry
-    
-- Security-scanned
-    
-- Commonly allowed even when DockerHub/GHCR are blocked
-    
-- Matches enterprise Linux expectations (RHEL-like)
-    
+```bash
+docker run --rm --name deephaven \
+  -p 10000:10000 \
+  deephaven-local:1.0
+```
 
 ---
 
-## When this approach is ideal vs not
+### 4) Verify it’s up
 
-|Situation|Verdict|
-|---|---|
-|Docker allowed only in WEnix|✅ Perfect|
-|No external registry pulls|✅ Works|
-|Need reproducible team setup|✅ Good|
-|Want “official Deephaven image”|❌ Not possible|
+On WEnix:
+
+```bash
+docker logs -f deephaven
+```
+
+From a browser (depending on where you’re running):
+
+- If you have browser access on that machine: `http://localhost:10000/ide`
+    
+- If you need to access from Windows: `http://<wenix-hostname-or-ip>:10000/ide`
+    
+
+If Windows can’t reach it, it’s usually firewall / routing.
 
 ---
 
-## If you want next
+## Two common issues and fixes
 
-I can:
+### A) `pip install` inside Docker says “No matching distribution found”
 
-- Slim this image (multi-stage)
+That means your `wheels/` folder is incomplete (missing deps) or contains wrong platform wheels.  
+Re-run Step 1 exactly.
+
+### B) UBI can’t `dnf install python39`
+
+Some corporate networks block RedHat repos. If that happens, you have 2 options:
+
+- use your org’s **internal yum repo** (if configured), or
     
-- Add PSK auth
-    
-- Add your `orchestrator.py`
-    
-- Add startup scripts
-    
-- Turn this into a `docker-compose` service alongside your backend
+- switch base image to one you _can_ `dnf` from (sometimes `ubi8/ubi-minimal` is even harder)
     
 
-Just say the word 👍
+If you hit this, paste the `dnf` error lines.
+
+---
+
+If you share the last ~30 lines of `docker build` output (especially the red error section), I’ll tell you exactly what to tweak (packages, Python version, missing wheels, etc.).
