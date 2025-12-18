@@ -4,119 +4,140 @@
 - Look at Metrics View
 - Try to tune the performance of Streaming Ingestion SDK while doing SCD2-merge
 
-Nice — you fixed the port mapping. ✅  
-Now you’re getting **403 Forbidden**, which means:
+Short answer: **Yes, you _can_** — but **not as-is**.  
+`registry.access.redhat.com/ubi8/ubi` is a **minimal RHEL base**, so you must install **Python + system deps yourself** before Deephaven will work.
 
-- Nginx **is reachable**
-    
-- But it’s **not allowed to serve the directory / files** you copied (permissions / SELinux labeling / wrong doc root)
-    
-
-On **UBI nginx**, this is super common because it runs as a non-root user and expects content under specific paths/permissions.
+Below is the **correct, enterprise-safe way** to do it.
 
 ---
 
-## What’s causing 403 in your case
+## Why `ubi8/ubi` needs extra steps
 
-Most likely **your Angular files in `/usr/share/nginx/html` are not readable by the nginx user** (or nginx is serving a different root, like `/opt/app-root/src`).
-
-Also your `docker ps` shows exposed ports `8080/tcp, 8443/tcp` which matches UBI nginx defaults.
-
----
-
-## Step 1 — confirm what root nginx is serving
-
-Run:
-
-```bash
-docker exec -it thales-edge-ui sh -c "grep -R \"root \" -n /etc/nginx/nginx.conf /etc/nginx/conf.d 2>/dev/null | head -50"
-```
-
-If it shows something like:
-
-- `root /usr/share/nginx/html;` → then it’s **permissions**
+- UBI **does NOT include Python**
     
-- `root /opt/app-root/src;` (or similar) → then your COPY path is wrong for UBI nginx
+- No `pip`, no `venv`
     
+- Deephaven needs:
+    
+    - Python 3.9/3.10
+        
+    - `pip`
+        
+    - native libs (glibc, openssl, libstdc++, etc.)
+        
+
+So we bootstrap Python using **dnf**.
 
 ---
 
-## Step 2 — check if index.html exists where nginx expects
-
-First check both places:
-
-```bash
-docker exec -it thales-edge-ui sh -c "ls -la /usr/share/nginx/html | head -30"
-docker exec -it thales-edge-ui sh -c "ls -la /opt/app-root/src 2>/dev/null | head -30"
-```
-
-You should see `index.html` in the actual root folder.
-
----
-
-## Fix option A (recommended): copy into UBI nginx expected web root + correct permissions
-
-Many UBI nginx images expect content in:
-
-✅ `/opt/app-root/src`
-
-So update runtime stage to:
+## ✅ Recommended Dockerfile (UBI 8 + offline wheels)
 
 ```dockerfile
-FROM registry.access.redhat.com/ubi8/nginx-120
+FROM registry.access.redhat.com/ubi8/ubi
 
-COPY --from=build /app/dist/thales-edge/browser/ /opt/app-root/src/
+# ---- System packages ----
+RUN dnf install -y \
+      python39 \
+      python39-pip \
+      gcc \
+      gcc-c++ \
+      make \
+      libstdc++ \
+      glibc-langpack-en \
+      openssl \
+    && dnf clean all
 
-USER root
-RUN chmod -R g+rwX /opt/app-root/src && chgrp -R 0 /opt/app-root/src
-USER 1001
+# Make python/pip available as "python" and "pip"
+RUN alternatives --set python /usr/bin/python3.9 \
+ && alternatives --set pip /usr/bin/pip3.9
+
+# ---- App setup ----
+WORKDIR /app
+COPY wheels/ /wheels/
+
+RUN pip install --no-index --find-links=/wheels deephaven-server
+
+EXPOSE 10000
+
+CMD ["python", "-m", "deephaven_server"]
 ```
 
-Then rebuild + run:
+---
+
+## 🔑 Important notes (read this)
+
+### 1) Wheels must be **Linux wheels**
+
+When you download wheels on Windows, make sure they are **manylinux** wheels, not Windows ones.
+
+Best practice:
 
 ```bash
-docker build -t thales-edge-ui .
-docker rm -f thales-edge-ui
-docker run -d -p 8080:8080 --name thales-edge-ui thales-edge-ui
+pip download deephaven-server \
+  --platform manylinux2014_x86_64 \
+  --python-version 39 \
+  --only-binary=:all: \
+  -d wheels
 ```
+
+Do this on **any machine that has internet** (Windows is fine).
 
 ---
 
-## Fix option B: keep `/usr/share/nginx/html` but set permissions
+### 2) If build fails on native deps
 
-If nginx root really is `/usr/share/nginx/html`, then do:
+If you see errors like:
 
-```dockerfile
-COPY --from=build /app/dist/thales-edge/browser/ /usr/share/nginx/html/
+- `gcc not found`
+    
+- `cannot find -lstdc++`
+    
+- `libssl.so not found`
+    
 
-USER root
-RUN chmod -R a+rX /usr/share/nginx/html
-USER 1001
-```
+Just add the missing package via `dnf install`.
 
-(UBI images often run as `1001`, not `nginx`.)
+UBI is enterprise-friendly but intentionally minimal.
 
 ---
 
-## Why “403” specifically?
+## 🟢 Why UBI is a GOOD choice in your org
 
-403 on nginx static hosting usually happens when:
-
-- directory has no execute bit for traversal (`x`)
+- Approved RedHat registry
     
-- files aren’t readable by the running user
+- Security-scanned
     
-- nginx has no `index` file or autoindex disabled (but then usually you see 403 too)
+- Commonly allowed even when DockerHub/GHCR are blocked
     
-
-So permissions/root-path are the key.
+- Matches enterprise Linux expectations (RHEL-like)
+    
 
 ---
 
-### Do this one command and paste output (it will pinpoint instantly)
+## When this approach is ideal vs not
 
-```bash
-docker exec -it thales-edge-ui sh -c "nginx -T 2>/dev/null | sed -n '1,160p'"
-```
+|Situation|Verdict|
+|---|---|
+|Docker allowed only in WEnix|✅ Perfect|
+|No external registry pulls|✅ Works|
+|Need reproducible team setup|✅ Good|
+|Want “official Deephaven image”|❌ Not possible|
 
-From that I’ll tell you exactly which root path it’s using and which of the two fixes above is the right one.
+---
+
+## If you want next
+
+I can:
+
+- Slim this image (multi-stage)
+    
+- Add PSK auth
+    
+- Add your `orchestrator.py`
+    
+- Add startup scripts
+    
+- Turn this into a `docker-compose` service alongside your backend
+    
+
+Just say the word 👍
