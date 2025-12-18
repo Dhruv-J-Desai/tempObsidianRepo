@@ -109,3 +109,50 @@ If you paste the output of:
     
 - `npm view @angular/animations version`  
     I can tell you immediately whether it’s a **registry** issue or a **package version availability** issue.
+
+
+
+
+
+
+Put those lines in a **project-level `.npmrc`** file in the **root of your Angular repo** (same folder where `package.json` is).
+
+### Where
+
+Example (from your screenshot):  
+`C:\Users\TAP3507\source\projects\TDSBI-POC\BIShowcase2025\thales-edge\`
+
+So create:  
+`C:\Users\TAP3507\source\projects\TDSBI-POC\BIShowcase2025\thales-edge\.npmrc`
+
+### How (Windows PowerShell)
+
+Run this **inside the repo root**:
+
+```powershell
+cd C:\Users\TAP3507\source\projects\TDSBI-POC\BIShowcase2025\thales-edge
+
+@"
+registry=https://repo.td.com/repository/tds-npm-all-release/
+always-auth=true
+strict-ssl=false
+"@ | Set-Content -Encoding ascii .npmrc
+```
+
+Verify:
+
+```powershell
+Get-Content .npmrc
+npm config get registry
+```
+
+Then clean + install:
+
+```powershell
+Remove-Item -Recurse -Force node_modules -ErrorAction SilentlyContinue
+Remove-Item -Force package-lock.json -ErrorAction SilentlyContinue
+npm cache clean --force
+npm install --legacy-peer-deps
+```
+
+(If you’re using Git Bash instead of PowerShell, tell me and I’ll give the exact commands for that shell.)
