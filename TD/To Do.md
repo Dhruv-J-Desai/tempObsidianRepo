@@ -4,114 +4,109 @@
 - Look at Metrics View
 - Try to tune the performance of Streaming Ingestion SDK while doing SCD2-merge
 
-Yep — this new screenshot shows **why your `npm install @angular/cdk@16.2.14` still fails**:
+I see the problem now from your screenshots:
 
-✅ You _think_ you’re on Angular 16…  
-❌ but your project is currently still pinned to **Angular 20**:
+✅ You fixed most `@angular/*` to **16.2.16** and CDK/Material to **16.2.14**  
+❌ But your dependency set is still **not a valid Angular 16 set**, mainly because:
 
-```
-Found: @angular/common@20.3.0
-"@angular/common@20.3.0" from the root project
-```
-
-So right now your `package.json` (or an existing lock/partial install) still has:
-
-- `@angular/common: 20.3.0` (and likely other `@angular/*` at 20.x)
+1. **`zone.js` is still `0.15.0`** (that’s for newer Angular). Angular 16 expects `zone.js` **~0.13.x**.
+    
+2. You’re missing a couple of core Angular packages that are normally present (`platform-browser-dynamic`, `animations`), which can confuse resolution.
+    
+3. Your npm error shows `Found: @angular/common@undefined` — that usually happens when the install is half-resolving + the tree is inconsistent. Fixing the versions + doing a clean install resolves it.
     
 
-That’s why CDK 16 refuses — it expects Angular 16/17.
+Do this exactly:
 
 ---
 
-# Fix (do it in the right order)
+## 1) Fix `package.json` versions (copy these)
 
-## 1) Hard reset (again) — because the repo is in a mixed state
+### `dependencies`
 
-Run this from the project root:
+Make sure you have **all** of these:
 
-```bash
-rm -rf node_modules package-lock.json .angular
+```json
+"dependencies": {
+  "@angular/animations": "16.2.16",
+  "@angular/common": "16.2.16",
+  "@angular/compiler": "16.2.16",
+  "@angular/core": "16.2.16",
+  "@angular/forms": "16.2.16",
+  "@angular/platform-browser": "16.2.16",
+  "@angular/platform-browser-dynamic": "16.2.16",
+  "@angular/router": "16.2.16",
+
+  "@angular/cdk": "16.2.14",
+  "@angular/material": "16.2.14",
+
+  "rxjs": "7.8.1",
+  "tslib": "2.3.0",
+  "zone.js": "0.13.3"
+}
 ```
 
-(You already did earlier, but do it again now because installs have partially happened.)
+✅ Change your current `zone.js: 0.15.0` → **0.13.3** (this is important)
+
+Keep your Deephaven + ag-grid deps as they are.
+
+### `devDependencies`
+
+Make sure these exist:
+
+```json
+"devDependencies": {
+  "@angular/cli": "16.2.16",
+  "@angular/compiler-cli": "16.2.16",
+  "@angular-devkit/build-angular": "16.2.16",
+  "typescript": "5.1.6"
+}
+```
+
+🚫 Also ensure you **do NOT** have:
+
+- `@angular/build` (delete it if present)
+    
 
 ---
 
-## 2) Force Angular 16 FIRST (core packages)
+## 2) Clean EVERYTHING and reinstall
 
 Run:
 
 ```bash
-npm install \
-  @angular/core@16.2.16 \
-  @angular/common@16.2.16 \
-  @angular/compiler@16.2.16 \
-  @angular/platform-browser@16.2.16 \
-  @angular/platform-browser-dynamic@16.2.16 \
-  @angular/router@16.2.16 \
-  @angular/forms@16.2.16 \
-  @angular/animations@16.2.16
-```
-
-This step is critical: it removes the `20.3.0` pins.
-
----
-
-## 3) Then install Angular CLI + build tooling (still 16)
-
-```bash
-npm install -D \
-  @angular/cli@16.2.16 \
-  @angular/compiler-cli@16.2.16 \
-  @angular-devkit/build-angular@16.2.16 \
-  typescript@5.1.6
-```
-
----
-
-## 4) Then install CDK/Material for Angular 16
-
-```bash
-npm install @angular/cdk@16.2.14
-# if you use material:
-npm install @angular/material@16.2.14
-```
-
----
-
-## 5) Finally run a clean install to lock everything
-
-```bash
 rm -rf node_modules package-lock.json
+npm cache clean --force
 npm install
 ```
 
 ---
 
-# Most likely you have these lines in package.json (you must change them)
-
-Search in `package.json` for any `@angular/*` showing 20.x:
+## 3) Sanity check
 
 ```bash
-cat package.json | grep -E "\"@angular/" -n
+npm ls @angular/core @angular/common @angular/cdk zone.js
 ```
 
-If you see stuff like:
+You should see:
 
-```json
-"@angular/common": "20.3.0"
-"@angular/core": "20.3.0"
-"@angular/cdk": "^20.2.7"
-```
-
-Change all of them to **16.2.x**.
+- `@angular/*` → 16.2.x
+    
+- `@angular/cdk` → 16.2.14
+    
+- `zone.js` → 0.13.3
+    
 
 ---
 
-## Why your earlier “big install” didn’t stick
+### If it STILL fails
 
-Because you probably still have **some `@angular/*` pinned to 20.x in package.json**, and npm will honor the root project pins first.
+Run one command and paste the output:
 
----
+```bash
+npm ls @angular/common @angular/cdk @angular/material zone.js --all
+```
 
-If you paste just your `package.json` `dependencies` section (only the `@angular/*` lines are enough), I’ll tell you the exact edits so it’s consistent in one shot.
+But 99% of the time, **fixing zone.js + removing @angular/build + clean install** resolves this loop.
+
+If you want, paste your full `dependencies` + `devDependencies` (just those blocks) and I’ll point out the last mismatched line.
