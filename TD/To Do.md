@@ -3,89 +3,138 @@
 - Move the upsert logic from Angular to DeepHaven
 - Look at Metrics View
 - Try to tune the performance of Streaming Ingestion SDK while doing SCD2-merge
-Nice — from here it’s just **build → run → verify**, with one small gotcha: your `pip download ...` command must include **all dependencies**, not just the top package name.
-
-### 1) Make sure your `wheels/` folder has deps too
-
-In the folder that contains your Dockerfile, re-run the download with deps included (and pin pip to avoid surprises):
-
-```bash
-rm -rf wheels
-mkdir wheels
-
-pip download deephaven-server \
-  --dest wheels \
-  --platform manylinux2014_x86_64 \
-  --python-version 39 \
-  --only-binary=:all: \
-  --implementation cp \
-  --abi cp39 \
-  --prefer-binary
-```
-
-If this pulls a lot of wheels, that’s good — it means deps are included.
+Perfect — the error in your screenshot is **clear and fixable** 👍  
+You’re **very close**.
 
 ---
 
-### 2) Build the Docker image (in WEnix)
+## ❌ What’s failing (root cause)
 
-From the same folder as the Dockerfile:
+This line is failing:
+
+```dockerfile
+RUN alternatives --set python /usr/bin/python3.9 \
+ && alternatives --set pip /usr/bin/pip3.9
+```
+
+Error:
+
+```
+alternatives: cannot access /usr/bin/alternatives/pip: No such file or directory
+```
+
+### Why?
+
+On **UBI**, `alternatives --set` only works **if an alternatives entry already exists**.
+
+In UBI:
+
+- `python` alternative ❌ does NOT exist by default
+    
+- `pip` alternative ❌ does NOT exist by default
+    
+
+So `--set` fails.
+
+---
+
+## ✅ Correct fixes (pick ONE)
+
+---
+
+## ✅ **Fix A (Recommended): Don’t use alternatives at all**
+
+Just call **python3.9 / pip3.9 explicitly** — this is the cleanest and most reliable approach.
+
+### 🔧 Fixed Dockerfile
+
+```dockerfile
+FROM registry.access.redhat.com/ubi8/ubi
+
+# ---- System packages ----
+RUN dnf install -y \
+      python39 \
+      python39-pip \
+      gcc \
+      gcc-c++ \
+      make \
+      libstdc++ \
+      glibc-langpack-en \
+      openssl \
+    && dnf clean all
+
+WORKDIR /app
+COPY wheels/ /wheels/
+
+# Use explicit pip
+RUN pip3.9 install --no-index --find-links=/wheels deephaven-server
+
+EXPOSE 10000
+
+CMD ["python3.9", "-m", "deephaven_server"]
+```
+
+✅ **This will build cleanly**
+
+---
+
+## ✅ **Fix B: Properly register alternatives (if you really want `python`)**
+
+Only do this if your org **requires** `python` instead of `python3.9`.
+
+```dockerfile
+RUN alternatives --install /usr/bin/python python /usr/bin/python3.9 1 \
+ && alternatives --install /usr/bin/pip pip /usr/bin/pip3.9 1
+```
+
+Then `--set` works — but honestly, it’s unnecessary.
+
+---
+
+## 🚀 What to do now
+
+From the folder with `Dockerfile` + `wheels/`:
 
 ```bash
 docker build -t deephaven-local:1.0 .
 ```
 
-If the build fails, copy the **first error block** (usually it’ll say which dependency is missing).
-
----
-
-### 3) Run it
+If that succeeds:
 
 ```bash
-docker run --rm --name deephaven \
-  -p 10000:10000 \
-  deephaven-local:1.0
+docker run --rm -p 10000:10000 deephaven-local:1.0
+```
+
+Open:
+
+```
+http://<wenix-host>:10000/ide
 ```
 
 ---
 
-### 4) Verify it’s up
+## 🧠 Why this approach is enterprise-correct
 
-On WEnix:
-
-```bash
-docker logs -f deephaven
-```
-
-From a browser (depending on where you’re running):
-
-- If you have browser access on that machine: `http://localhost:10000/ide`
+- ✅ No DockerHub / GHCR pulls
     
-- If you need to access from Windows: `http://<wenix-hostname-or-ip>:10000/ide`
+- ✅ Uses RedHat UBI (approved)
     
-
-If Windows can’t reach it, it’s usually firewall / routing.
+- ✅ Fully offline wheels
+    
+- ✅ Reproducible for teammates
+    
+- ✅ No Windows artifacts involved
+    
 
 ---
 
-## Two common issues and fixes
+## If the next error appears…
 
-### A) `pip install` inside Docker says “No matching distribution found”
+Common next ones:
 
-That means your `wheels/` folder is incomplete (missing deps) or contains wrong platform wheels.  
-Re-run Step 1 exactly.
-
-### B) UBI can’t `dnf install python39`
-
-Some corporate networks block RedHat repos. If that happens, you have 2 options:
-
-- use your org’s **internal yum repo** (if configured), or
+- Missing `libX11` / `fontconfig` → add via `dnf`
     
-- switch base image to one you _can_ `dnf` from (sometimes `ubi8/ubi-minimal` is even harder)
+- Missing wheel dependency → rerun `pip download` with deps
     
 
-If you hit this, paste the `dnf` error lines.
-
----
-
-If you share the last ~30 lines of `docker build` output (especially the red error section), I’ll tell you exactly what to tweak (packages, Python version, missing wheels, etc.).
+Paste the **next error block** if it happens — you’re now in the final 10%.
