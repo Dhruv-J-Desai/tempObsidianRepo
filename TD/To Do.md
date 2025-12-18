@@ -3,99 +3,102 @@
 - Move the upsert logic from Angular to DeepHaven
 - Look at Metrics View
 - Try to tune the performance of Streaming Ingestion SDK while doing SCD2-merge
-Yep — this screenshot confirms the **exact situation**:
+Nice — the important part is: **it actually started successfully**. In your screenshot I can see:
 
-- Deephaven is failing inside the **container** with: `libjvm.so: cannot open shared object file`
+- “Starting Deephaven server…”
     
-- You ran `java --version` and it shows Java 17 ✅ — but **that is on the WEnix host**, not inside the container.
+- “Server started on port 10000”
+    
+- “Deephaven is running at [http://0.0.0.0:10000/?psk=…”](http://0.0.0.0:10000/?psk=%E2%80%A6%E2%80%9D)
+    
+- Then it shows **“Aborted”**
     
 
-So your image `deephaven-local:1.0` still **doesn’t have Java installed / configured**.
+That “Aborted” is almost never Deephaven crashing by itself — it usually means **your terminal sent an interrupt / the parent shell got killed**, or Docker got stopped (Ctrl+C / session ended / WSL terminal closed / etc.). Deephaven was running fine up to that point.
 
----
-
-## 1) First prove it: check Java _inside the container_
-
-Run:
+### 1) Run it in detached mode so it doesn’t die when you close the terminal
 
 ```bash
-docker run --rm -it --entrypoint bash deephaven-local:1.0 -lc "java -version || echo NO_JAVA"
+docker run -d --name deephaven \
+  -p 10000:10000 \
+  deephaven-local:1.1.0
 ```
 
-If it prints `NO_JAVA`, that’s the proof.
-
----
-
-## 2) Fix the Dockerfile: install JDK + set JAVA_HOME + LD_LIBRARY_PATH
-
-Use **Java 17** since UBI clearly supports it in your environment:
-
-```dockerfile
-FROM registry.access.redhat.com/ubi8/ubi
-
-RUN dnf install -y \
-      python39 \
-      python39-pip \
-      java-17-openjdk-headless \
-      gcc \
-      gcc-c++ \
-      make \
-      libstdc++ \
-      glibc-langpack-en \
-      openssl \
-    && dnf clean all
-
-ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk
-ENV PATH="${JAVA_HOME}/bin:${PATH}"
-ENV LD_LIBRARY_PATH="${JAVA_HOME}/lib/server:${JAVA_HOME}/lib:${LD_LIBRARY_PATH}"
-
-WORKDIR /app
-COPY wheels/ /wheels/
-
-RUN pip3.9 install --no-index --find-links=/wheels deephaven-server
-
-EXPOSE 10000
-CMD ["/usr/local/bin/deephaven", "server", "--host", "0.0.0.0", "--port", "10000"]
-```
-
-That `LD_LIBRARY_PATH` line is important because `jpy`/JVM bootstrap often needs help finding `libjvm.so`.
-
----
-
-## 3) Rebuild with a NEW tag (avoid accidentally running old image)
+Check it’s running:
 
 ```bash
-docker build --no-cache -t deephaven-local:2.0 .
+docker ps | grep deephaven
+docker logs -f deephaven
 ```
 
----
-
-## 4) Verify JVM bits inside the new image
+Stop it when you want:
 
 ```bash
-docker run --rm -it --entrypoint bash deephaven-local:2.0 -lc '
-java -version
-echo "JAVA_HOME=$JAVA_HOME"
-ls -l $JAVA_HOME/lib/server/libjvm.so
-'
+docker stop deephaven
 ```
-
-You must see `libjvm.so` listed.
 
 ---
 
-## 5) Run Deephaven
+### 2) If you _need_ the PSK, don’t rely on the auto-generated `?psk=...`
+
+Auto PSK is annoying because it changes each run. Make it stable:
 
 ```bash
-docker run --rm --name deephaven -p 10000:10000 deephaven-local:2.0
+docker run -d --name deephaven \
+  -p 10000:10000 \
+  -e DEEPHAVEN_AUTH_TYPE=psk \
+  -e DEEPHAVEN_PSK="my-fixed-psk-123" \
+  deephaven-local:1.1.0
 ```
 
+Then you always use the same PSK in:
+
+- Angular env
+    
+- backend `application.yml`
+    
+
 ---
 
-### Why your `java --version` didn’t help
+### 3) Confirm it’s reachable
 
-Because it was executed on **WEnix host shell**. Containers don’t “inherit” host-installed Java unless the image includes it.
+From the WEnix host:
+
+```bash
+curl -I http://localhost:10000/ | head
+```
+
+From your Windows browser (if needed):
+
+- `http://<wenix-hostname-or-ip>:10000/ide`
+    
+
+If Windows can’t reach it, it’s firewall/routing, not Deephaven.
 
 ---
 
-If you paste the output of step (4) (the `ls -l ... libjvm.so` line), I’ll confirm you’re 100% good before you wire PSK/origins back in.
+### 4) Why you saw “Aborted”
+
+Most common causes:
+
+- You pressed **Ctrl+C**
+    
+- Terminal session disconnected
+    
+- WSL shell closed / crashed
+    
+- Docker daemon restarted
+    
+
+Running detached (`-d`) avoids all of these.
+
+---
+
+If you run it detached and it still stops, send me:
+
+```bash
+docker ps -a | grep deephaven
+docker logs deephaven --tail 200
+```
+
+and I’ll pinpoint the real abort reason.
