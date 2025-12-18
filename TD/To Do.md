@@ -4,155 +4,208 @@
 - Look at Metrics View
 - Try to tune the performance of Streaming Ingestion SDK while doing SCD2-merge
 
-You’re **very close**. That screenshot shows **two different issues**:
+Perfect — you already have the **Node.js tarball (`node-v20.11.0-linux-x64.tar.xz`) downloaded locally**, and Docker Hub access is blocked.  
+Now let’s **use that tarball directly in your Dockerfile**, replacing the `FROM … nodejs` image completely.
 
-## 1) PowerShell error about `package-lock.json` not found
+I’ll show you **exactly how to adapt your existing multi-stage Angular build Dockerfile**.
 
-That’s fine — it just means you **don’t have a `package-lock.json`** in this repo. Ignore it.
+---
 
-## 2) You ran the flag wrong once
+## ✅ What you have (confirmed from your screenshot)
 
-You typed:
-
-- `npm install ==legacy-peer-deps` ❌ (double `==` makes npm think it’s a package name)
+- Node tarball present locally:
+    
+    ```
+    node-v20.11.0-linux-x64.tar.xz
+    ```
+    
+- Angular project with:
+    
+    ```
+    package.json
+    package-lock.json
+    dist/thales-edge/browser
+    ```
+    
+- Corporate npm registry:
+    
+    ```
+    https://repo.td.com/repository/tds-npm-all-release/
+    ```
     
 
-Correct is:
+---
 
-- `npm install --legacy-peer-deps` ✅
-    
+## 🎯 Goal
 
-(You did run the correct one after, so good.)
+Replace this:
 
-## 3) Real blocker: `ETARGET No matching version found for @angular/animations@16.2.16`
-
-This is almost always because **your registry/proxy doesn’t have that exact package version** (or it’s pointing to the wrong repo).
-
-From your earlier screenshot, your registry is:
-
-- `https://repo.td.com/repository/3rd-party-npm-central`
-    
-
-That repo might not host **all** Angular patch versions.
-
-### Fix: point this project to the “all” npm repo (the one that contains everything)
-
-Create a **project-local** `.npmrc` in the repo root (`thales-edge/.npmrc`) with:
-
-```ini
-registry=https://repo.td.com/repository/tds-npm-all-release/
-always-auth=true
-strict-ssl=false
+```dockerfile
+FROM snapshots.dev.registry.td.com/ubi8/nodejs-18:1-71 AS build
 ```
 
-Then run:
+With:
 
-```powershell
-npm config get registry
-```
+- A **minimal base OS**
+    
+- **Manually installed Node from tarball**
+    
+- Same `npm ci` + `npm run build`
+    
 
-Make sure it prints `tds-npm-all-release` (not `3rd-party-npm-central`).
+---
 
-Now clean + install:
+## ✅ Recommended Dockerfile (Node tarball–based, Docker Hub free)
 
-```powershell
-Remove-Item -Recurse -Force node_modules -ErrorAction SilentlyContinue
-Remove-Item -Force package-lock.json -ErrorAction SilentlyContinue
-npm cache clean --force
-npm install --legacy-peer-deps
+### 📄 Dockerfile
+
+```dockerfile
+############################################
+# Stage 1: Build Angular app using Node tarball
+############################################
+FROM registry.access.redhat.com/ubi8/ubi-minimal AS build
+
+WORKDIR /app
+
+# Install required OS tools
+RUN microdnf install -y \
+      tar \
+      xz \
+      gzip \
+      shadow-utils \
+    && microdnf clean all
+
+# Copy Node tarball into image
+COPY node-v20.11.0-linux-x64.tar.xz /opt/
+
+# Install Node
+RUN mkdir -p /opt/node \
+    && tar -xJf /opt/node-v20.11.0-linux-x64.tar.xz -C /opt/node --strip-components=1 \
+    && ln -s /opt/node/bin/node /usr/local/bin/node \
+    && ln -s /opt/node/bin/npm /usr/local/bin/npm \
+    && ln -s /opt/node/bin/npx /usr/local/bin/npx \
+    && rm /opt/node-v20.11.0-linux-x64.tar.xz
+
+# Verify node installation
+RUN node --version && npm --version
+
+# Copy dependency files first (layer caching)
+COPY package.json package-lock.json ./
+
+# Configure corporate npm registry and install deps
+RUN npm config set registry https://repo.td.com/repository/tds-npm-all-release/ \
+    && npm ci
+
+# Copy rest of the source
+COPY . .
+
+# Build Angular
+RUN npm run build
+
+
+############################################
+# Stage 2: Runtime image (Nginx)
+############################################
+FROM registry.access.redhat.com/ubi8/nginx-120
+
+COPY --from=build /app/dist/thales-edge/browser /usr/share/nginx/html/
+
+EXPOSE 80
 ```
 
 ---
 
-## If you still get `No matching version found`
+## 📁 Directory layout (important)
 
-Then your Nexus repo truly doesn’t have `16.2.16`.
+Your build context **must include the tarball**:
 
-Two ways out:
-
-### Option A (best): use an Angular patch version that **exists** in your Nexus
-
-Try installing `16.2.0` or `16.2.14` everywhere (keep all Angular packages same patch):
-
-In `package.json`, set all `@angular/*` to **16.2.14** (or one patch you know exists), including:
-
-- `@angular/animations`, `common`, `compiler`, `core`, `forms`, `platform-browser`, `platform-browser-dynamic`, `router`
-    
-- dev deps: `@angular/cli`, `@angular/compiler-cli`, `@angular-devkit/build-angular`
-    
-
-Then:
-
-```powershell
-npm install --legacy-peer-deps
 ```
-
-### Option B: temporarily use public npmjs (if policy allows)
-
-Only if permitted in your environment.
+thales-edge/
+├── Dockerfile
+├── node-v20.11.0-linux-x64.tar.xz
+├── package.json
+├── package-lock.json
+├── angular.json
+├── src/
+└── dist/
+```
 
 ---
 
-### One quick check (to confirm repo has that version)
+## 🚀 Build command
 
-Run:
+From inside `thales-edge`:
 
-```powershell
-npm view @angular/animations versions --json
+```bash
+docker build -t thales-edge-ui .
 ```
 
-If your registry is correct, this will return a big list. If `16.2.16` is not in that list, your Nexus doesn’t have it.
+---
 
-If you paste the output of:
+## 🔍 Why this works in your environment
 
-- `npm config get registry`
+✔ No Docker Hub  
+✔ No `node:` image  
+✔ Works with **air-gapped / restricted networks**  
+✔ Uses **official Node binaries**  
+✔ Matches your existing Angular pipeline
+
+---
+
+## ⚠️ Common pitfalls (watch out)
+
+1. **Wrong tarball architecture**
     
-- `npm view @angular/animations version`  
-    I can tell you immediately whether it’s a **registry** issue or a **package version availability** issue.
+    - Use `linux-x64` for UBI8
+        
+    - NOT `darwin` or `arm64` unless required
+        
+2. **Missing `xz`**
+    
+    - `.tar.xz` requires `xz` (already handled above)
+        
+3. **Angular dist path**
+    
+    - Must match:
+        
+        ```
+        dist/thales-edge/browser
+        ```
+        
 
+---
 
+## 🔁 Optional: downgrade to Node 18 (matches your old image)
 
+Just replace:
 
-
-
-Put those lines in a **project-level `.npmrc`** file in the **root of your Angular repo** (same folder where `package.json` is).
-
-### Where
-
-Example (from your screenshot):  
-`C:\Users\TAP3507\source\projects\TDSBI-POC\BIShowcase2025\thales-edge\`
-
-So create:  
-`C:\Users\TAP3507\source\projects\TDSBI-POC\BIShowcase2025\thales-edge\.npmrc`
-
-### How (Windows PowerShell)
-
-Run this **inside the repo root**:
-
-```powershell
-cd C:\Users\TAP3507\source\projects\TDSBI-POC\BIShowcase2025\thales-edge
-
-@"
-registry=https://repo.td.com/repository/tds-npm-all-release/
-always-auth=true
-strict-ssl=false
-"@ | Set-Content -Encoding ascii .npmrc
+```dockerfile
+COPY node-v20.11.0-linux-x64.tar.xz /opt/
 ```
 
-Verify:
+With:
 
-```powershell
-Get-Content .npmrc
-npm config get registry
+```dockerfile
+COPY node-v18.16.1-linux-x64.tar.xz /opt/
 ```
 
-Then clean + install:
+And adjust the filename in the `tar` command.
 
-```powershell
-Remove-Item -Recurse -Force node_modules -ErrorAction SilentlyContinue
-Remove-Item -Force package-lock.json -ErrorAction SilentlyContinue
-npm cache clean --force
-npm install --legacy-peer-deps
-```
+---
 
-(If you’re using Git Bash instead of PowerShell, tell me and I’ll give the exact commands for that shell.)
+## 🧠 If you want next
+
+I can help you with:
+
+- **Slimmer runtime image**
+    
+- **Offline npm cache**
+    
+- **Podman compatibility (WEnix)**
+    
+- **Multi-arch (x64 + ARM)**
+    
+- **Private Nexus-hosted Node tarball**
+    
+
+Just tell me 👍
