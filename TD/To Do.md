@@ -4,99 +4,173 @@
 - Look at Metrics View
 - Try to tune the performance of Streaming Ingestion SDK while doing SCD2-merge
 
-Got it — if you must stay on **Node v18.16.1**, you need to **downgrade Angular (and its build tooling)** to a version that _supports_ Node 18.16.
-
-From your error, your current Angular CLI is new enough that it requires **Node ≥ 20.19**, so you need to go back to an Angular major that supports Node 18.16 reliably.
-
-## The safest target for Node 18.16
-
-**Angular 16.2.x** is the most practical “works on Node 18.x” target (Angular 17+ often pushes Node requirements higher and has bigger tooling changes).
+Great, this screenshot shows the **last blocking issue very clearly**.  
+You’re _almost_ done with the downgrade — this is now a **version alignment problem**, not a conceptual one.
 
 ---
 
-# Step-by-step downgrade (works even if `ng` won’t run)
+## What the error really says (decoded)
 
-### 0) Create a branch
+Key parts from the screenshot:
 
-```bash
-git checkout -b downgrade-angular-node18
+```
+Could not resolve dependency:
+dev @angular-devkit/build-angular@16.2.16
+peer @angular/compiler-cli "^16.0.0"
 ```
 
-### 1) Downgrade Angular packages to 16.2.x
+But earlier in the same output:
 
-Run this from the Angular project root:
-
-```bash
-npm i -D @angular/cli@16.2.16 @angular/compiler-cli@16.2.16 typescript@5.1.6
-
-npm i @angular/core@16.2.16 @angular/common@16.2.16 @angular/compiler@16.2.16 \
-      @angular/platform-browser@16.2.16 @angular/platform-browser-dynamic@16.2.16 \
-      @angular/router@16.2.16 rxjs@7.8.1 zone.js@0.13.3
+```
+Found: @angular/compiler-cli@16.2.16
+node_modules/@angular/compiler-cli
 ```
 
-If you use Angular forms/animations/http, also pin them:
+So at first glance this looks fine… **but** npm is still failing because:
 
-```bash
-npm i @angular/forms@16.2.16 @angular/animations@16.2.16 @angular/common@16.2.16
+### 🔴 You still have a mismatched Angular dependency somewhere
+
+Most commonly one of these is true:
+
+1. ❌ Some `@angular/*` package is **not** at `16.2.16`
+    
+2. ❌ `typescript` version is incompatible
+    
+3. ❌ A leftover Vite / AnalogJS package is still pulling newer Angular peers
+    
+4. ❌ `package-lock.json` still contains newer Angular metadata
+    
+
+---
+
+## The rule for Angular downgrades (important)
+
+**ALL** Angular packages must be on the **same minor version**.
+
+That means:
+
+```
+@angular/*            → 16.2.16 (all of them)
+@angular-devkit/*     → 16.2.16
+@angular/compiler-cli → 16.2.16
+typescript            → 5.1.6
 ```
 
-### 2) Pin the Angular build tooling
+Even **one** straggler will break `npm install`.
+
+---
+
+## Do this EXACTLY (clean reset, no guessing)
+
+### 1️⃣ Remove all build artifacts and lockfiles
 
 ```bash
-npm i -D @angular-devkit/build-angular@16.2.16 @angular-devkit/core@16.2.16 @angular-devkit/schematics@16.2.16
+rm -rf node_modules package-lock.json .angular
 ```
 
-### 3) Remove/adjust Vite-related deps if you have them
+---
 
-Your earlier logs show `vite@7.x` etc. If your `package.json` has `vite`, `@vitejs/*`, or newer `yargs@18`, they’ll keep dragging Node 20 requirements.
+### 2️⃣ Force-install a fully aligned Angular 16 toolchain
 
-Remove Vite if it’s a direct dependency:
+Run this **as one command**:
 
 ```bash
-npm remove vite
+npm install \
+  @angular/cli@16.2.16 \
+  @angular/compiler@16.2.16 \
+  @angular/compiler-cli@16.2.16 \
+  @angular/core@16.2.16 \
+  @angular/common@16.2.16 \
+  @angular/platform-browser@16.2.16 \
+  @angular/platform-browser-dynamic@16.2.16 \
+  @angular/router@16.2.16 \
+  @angular/forms@16.2.16 \
+  @angular/animations@16.2.16 \
+  @angular-devkit/build-angular@16.2.16 \
+  @angular-devkit/core@16.2.16 \
+  @angular-devkit/schematics@16.2.16 \
+  rxjs@7.8.1 \
+  zone.js@0.13.3 \
+  typescript@5.1.6
 ```
 
-(If it’s coming transitively, the Angular 16 tooling usually avoids it.)
+This **overwrites everything** consistently.
 
-### 4) Clean install
+---
+
+### 3️⃣ Remove any remaining Vite / AnalogJS (must be zero)
+
+Run:
 
 ```bash
-rm -rf node_modules package-lock.json
-npm install
+npm ls | grep -E "vite|analog"
 ```
 
-### 5) Verify Node compatibility + build
+If **anything** shows up, remove it:
 
 ```bash
-node -v   # should be v18.16.1
+npm remove @analogjs/vite-plugin-angular analogjs vite
+```
+
+Then repeat step 1 + 2.
+
+---
+
+### 4️⃣ Verify versions (before building)
+
+```bash
 npx ng version
+```
+
+You **must** see:
+
+- Angular: **16.2.16**
+    
+- TypeScript: **5.1.6**
+    
+- Node: **18.16.1**
+    
+
+If yes → proceed.
+
+---
+
+### 5️⃣ Build
+
+```bash
 npx ng build
 ```
 
----
-
-# If your project is Angular 17/18/19 features (possible issues)
-
-Downgrading to 16 can break if you rely on newer features like:
-
-- `application` builder, newer SSR/prerender layout (`dist/<app>/browser` + `prerendered-routes.json`)
-    
-- standalone bootstrap patterns introduced/changed later
-    
-
-If `ng build` complains about builders / `angular.json`, tell me the exact error and I’ll give you the exact edits (usually it’s switching builders back to the classic `@angular-devkit/build-angular:browser` setup).
+This **will work** once everything is aligned.
 
 ---
 
-## One quick check (to confirm what you have)
+## Why this error kept looping
 
-Paste these sections from your `package.json`:
+You were doing the right thing, but npm is strict:
 
-- `dependencies`
+- Angular 16 **does not tolerate mixed minors**
     
-- `devDependencies`
+- Vite / AnalogJS **silently pulls Angular 18+ peers**
     
-- `scripts`
+- One leftover dep poisons the tree
     
 
-…and I’ll tell you **exactly which packages are forcing Node 20**, and the **minimum downgrade set** for your specific app (instead of a broad downgrade).
+Now you’re fixing it the **correct, deterministic way**.
+
+---
+
+## After this
+
+Once `ng build` works locally on Node 18, your **Dockerfile with `ubi8/nodejs-18` will work unchanged**.
+
+If you want, next I can:
+
+- Sanity-check your `package.json`
+    
+- Clean your `angular.json` (builders, SSR leftovers)
+    
+- Finalize the Dockerfile for Nexus + Node 18
+    
+
+You’re in the final stretch 👍
