@@ -3,122 +3,143 @@
 - Move the upsert logic from Angular to DeepHaven
 - Look at Metrics View
 - Try to tune the performance of Streaming Ingestion SDK while doing SCD2-merge
-Yep — and this is the _exact_ Docker networking trap:
+Got it — your error is:
 
-### Why Windows browser can use `localhost`, but your **container** can’t
+```
+sh: cannot create /dev/tcp/host.docker.internal/10000: Directory nonexistent
+```
 
-You have **three different “localhost” worlds**:
+That tells us something **very specific**:
 
-1. **Windows browser**
-    
+### ✅ Your container’s `sh` does NOT support `/dev/tcp/...`
 
-- `http://localhost:10000` means **your Windows machine**
-    
-- It works because the Deephaven port is exposed/forwarded to Windows (Docker Desktop, SSH tunnel, or port mapping)
-    
+`/dev/tcp` is a **bash feature** (and some shells), but not all `/bin/sh` implementations support it (and many enterprise images use a minimal `sh` that doesn’t).
 
-2. **WEnix host (Linux)**
-    
-
-- `localhost:10000` means **the WEnix host**
-    
-- It works because Deephaven is published on the host (e.g., `-p 10000:10000`)
-    
-
-3. **dh-orchestrator container**
-    
-
-- `localhost:10000` means **inside the dh-orchestrator container itself**
-    
-- ❌ Deephaven is _not_ running inside that container → **connection refused**
-    
-
-So the fact that Windows browser can reach Deephaven with `localhost` does **not** mean your container can.
+So we need a different way to test connectivity **without nc** and **without /dev/tcp**.
 
 ---
 
-## Prove it (run the check _inside_ the orchestrator container)
+# ✅ Best connectivity test you DO have: `curl`
 
-Right now your “CONNECTED” check looks like it was run on the host. Do it inside the container:
+Almost always present in UBI images. Try these **inside dh-orchestrator**:
+
+### 1) Test Deephaven by container name (if Deephaven is another container)
 
 ```bash
-docker exec -it dh-orchestrator sh -c 'echo > /dev/tcp/localhost/10000 && echo CONNECTED || echo FAILED'
+docker exec -it dh-orchestrator sh -c "curl -sS -v http://deephaven:10000/ 2>&1 | head -40"
 ```
 
-Expected:
+### 2) If Deephaven is on host: use host-gateway mapping, then curl it
 
-- likely `FAILED` (because localhost in that container ≠ host)
+First ensure you started orchestrator with this:
+
+```bash
+--add-host=host.docker.internal:host-gateway
+```
+
+Then test:
+
+```bash
+docker exec -it dh-orchestrator sh -c "curl -sS -v http://host.docker.internal:10000/ 2>&1 | head -40"
+```
+
+**Even if you get HTTP 404 or some message** — that’s still good.  
+What you don’t want is: `Connection refused` / `Could not resolve host`.
+
+---
+
+# ✅ Another test that works even if curl is missing: Java itself
+
+Since dh-orchestrator is a Java container, we can test TCP using Java:
+
+```bash
+docker exec -it dh-orchestrator sh -c 'java - << "EOF"
+import java.net.*;
+public class T {
+  public static void main(String[] args) throws Exception {
+    String host = args.length>0?args[0]:"deephaven";
+    int port = args.length>1?Integer.parseInt(args[1]):10000;
+    try (Socket s = new Socket()) {
+      s.connect(new InetSocketAddress(host, port), 2000);
+      System.out.println("CONNECTED to " + host + ":" + port);
+    }
+  }
+}
+EOF'
+```
+
+(If this is too heavy, we can do a simpler one-liner, but this works in locked-down images.)
+
+---
+
+# 🔥 Now the real fix (not just testing)
+
+From your `docker ps`, I see:
+
+- `deephaven-local:1.2.0` is running
+    
+- `dh-orchestrator:1.0` is running
     
 
-Now try using the **host gateway**:
+But I don’t see a shared network.
 
-```bash
-docker exec -it dh-orchestrator sh -c 'echo > /dev/tcp/host.docker.internal/10000 && echo CONNECTED || echo FAILED'
-```
+## ✅ Fix: Put them on the same Docker network and use the container name
 
-If that gives `CONNECTED`, you’ve confirmed the fix.
-
----
-
-## Fix option 1: Deephaven is running on the WEnix host (or published to host)
-
-Run orchestrator with host-gateway mapping and point to it:
-
-```bash
-docker run -d --name dh-orchestrator \
-  -p 8081:8081 \
-  --add-host=host.docker.internal:host-gateway \
-  -e DEEPHAVEN_HOST=host.docker.internal \
-  -e DEEPHAVEN_PORT=10000 \
-  -e DH_PSK=<your_psk> \
-  dh-orchestrator:latest
-```
-
-✅ This makes the container reach “the host’s localhost”.
-
----
-
-## Fix option 2 (better): Deephaven is another container
-
-Put both containers on the same Docker network and use the **container name**:
+### 1) Create network
 
 ```bash
 docker network create dh-net
-
-docker run -d --name deephaven --network dh-net \
-  -p 10000:10000 \
-  deephaven-local:1.2.0
-
-docker run -d --name dh-orchestrator --network dh-net \
-  -p 8081:8081 \
-  -e DEEPHAVEN_HOST=deephaven \
-  -e DEEPHAVEN_PORT=10000 \
-  -e DH_PSK=<your_psk> \
-  dh-orchestrator:latest
 ```
 
-Then inside orchestrator, you use `deephaven:10000` (not localhost).
+### 2) Re-run Deephaven on that network
+
+```bash
+docker rm -f deephaven-local || true
+
+docker run -d \
+  --name deephaven-local \
+  --network dh-net \
+  -p 10000:10000 \
+  deephaven-local:1.2.0
+```
+
+### 3) Re-run orchestrator on that network and point it to Deephaven
+
+```bash
+docker rm -f dh-orchestrator || true
+
+docker run -d \
+  --name dh-orchestrator \
+  --network dh-net \
+  -p 8081:8081 \
+  -e DEEPHAVEN_HOST=deephaven-local \
+  -e DEEPHAVEN_PORT=10000 \
+  -e DH_PSK=<psk_here> \
+  dh-orchestrator:1.0
+```
+
+✅ Now `DEEPHAVEN_HOST=deephaven-local` works reliably.
 
 ---
 
-## What to change in your app config
+# Why your browser can use localhost but containers can’t
 
-Wherever you currently have:
+Browser `localhost` = your machine.  
+Container `localhost` = itself.
 
-- `DEEPHAVEN_HOST=localhost`  
-    change it to:
-    
-- `host.docker.internal` (if Deephaven is via host port)  
-    **or**
-    
-- `deephaven` (if Deephaven is another container on same network)
-    
+So for container-to-container:  
+✅ use container DNS name on a shared network.
 
 ---
 
-If you tell me **how Deephaven is running** right now:
+## Quick question-free next step (do this now)
 
-- “as a docker container named ___” **or**
-    
-- “directly on host”  
-    …I’ll give you the exact final `docker run` line for your setup (no guessing).
+Run this to see if `curl` exists inside dh-orchestrator:
+
+```bash
+docker exec -it dh-orchestrator sh -c "curl --version || echo 'curl missing'"
+```
+
+If curl exists, we’ll use it to confirm after networking change. If not, we’ll use the Java socket test.
+
+If you paste your current `docker run` commands for deephaven + dh-orchestrator, I’ll rewrite them into the final working set with the right ports and network.
