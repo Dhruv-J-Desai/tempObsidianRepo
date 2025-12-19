@@ -3,104 +3,198 @@
 - Move the upsert logic from Angular to DeepHaven
 - Look at Metrics View
 - Try to tune the performance of Streaming Ingestion SDK while doing SCD2-merge
-It _might_ be blocked, but not because it’s “hacky” — because some orgs lock down images and runtimes in a few common ways.
+Below is a complete, end-to-end **Option 1 (entrypoint.sh runtime injection)** setup for an **Angular app served by Nginx**.
 
-Here’s what could block it, and the safer alternatives.
-
-## What could block that `/bin/sh -c "envsubst ... && nginx ..."` approach
-
-1. **Your image might not include `envsubst`**
-    
-
-- `envsubst` usually comes from `gettext` / `gettext-base`.
-    
-- Many minimal images (including some nginx variants) don’t have it.
-    
-- In that case you’ll get: `envsubst: not found`.
-    
-
-2. **Security policies may restrict overriding the container command**
-    
-
-- Some platforms (or internal policies) require the image’s default `CMD/ENTRYPOINT` not be overridden.
-    
-- If you’re running plain Docker on WEnix, this is less common, but CI/K8s admission policies can enforce it.
-    
-
-3. **Read-only filesystem**
-    
-
-- If the container FS is read-only, you can’t write `/usr/share/nginx/html/env.js`.
-    
-- You’d see “read-only file system” errors.
-    
-
-4. **Running as non-root / permission issues**
-    
-
-- If nginx image runs as non-root and the html dir isn’t writable, writing `env.js` may fail.
-    
-
-None of these are guaranteed; they’re just the usual “org hardening” points.
+And no — you **do not run `entrypoint.sh` manually**. Docker runs it **automatically on every container start**, so when you pass a new PSK via `docker run -e`, it regenerates `env.js` for that container.
 
 ---
 
-## How to check quickly (no guessing)
+# 1) Angular changes (one-time)
 
-Run this on WEnix:
+## A) Create a runtime template file
 
-```bash
-docker run --rm -it thales-edge-ui /bin/sh -c "which envsubst || echo 'no envsubst'; id; ls -ld /usr/share/nginx/html"
+Create this file in your Angular project:
+
+**`src/assets/env.template.js`**
+
+```js
+// This file is a template; it will be copied into the image.
+// The container startup will generate env.js from Docker env vars.
+window.__env = {
+  DEEPHAVEN_PSK: "__DEEPHAVEN_PSK__"
+};
 ```
 
-Interpretation:
+## B) Load `env.js` in `index.html`
 
-- If it prints `no envsubst` → you need the alternative below.
-    
-- If `/usr/share/nginx/html` isn’t writable → you need to write somewhere else (or bake it at build time).
-    
-- If `/bin/sh` doesn’t exist → image is super minimal; then this method won’t work.
-    
+Edit:
 
----
+**`src/index.html`**
 
-## If your org blocks it: best alternatives
+Add this **before** your main scripts (usually before `</head>`):
 
-### ✅ Alternative A (most org-friendly): **Bake `env.js` at build time**
-
-If your PSK is not meant to be secret (dev-only), you can build an image per environment.  
-Downside: you must rebuild when PSK changes.
-
-### ✅ Alternative B (most enterprise-safe): **Don’t send PSK to Angular at all**
-
-Keep `DEEPPHAVEN_PSK` only in backend, and UI calls backend.  
-This avoids leaking PSK to every browser.
-
-### ✅ Alternative C (still runtime, but less “command override”): entrypoint script
-
-Yes it’s “extra work”, but it’s also the most standard pattern and least likely to be blocked, because:
-
-- you don’t override command at runtime
-    
-- it’s part of the image
-    
-- security scanners understand it
-    
-
----
-
-## Biggest non-org issue: PSK exposure
-
-Even if your org allows it, injecting `DEEPPHAVEN_PSK` into browser JS means any user can see it.
-
-If that PSK gives access to anything important, your security team _will_ care.
-
----
-
-If you paste the output of this command:
-
-```bash
-docker inspect --format='Entrypoint={{.Config.Entrypoint}} Cmd={{.Config.Cmd}} User={{.Config.User}}' thales-edge-ui
+```html
+<script src="assets/env.js"></script>
 ```
 
-…I can tell you which method is most likely to work in your org **without** getting blocked.
+> Keep it above the Angular bundle scripts so it’s available when Angular bootstraps.
+
+## C) Read it in Angular code
+
+Where you need the PSK:
+
+```ts
+const psk = (window as any).__env?.DEEPHAVEN_PSK;
+console.log("PSK from runtime env:", psk);
+```
+
+(You can wrap it in a service if you want.)
+
+---
+
+# 2) entrypoint.sh (inside the Docker image)
+
+Create:
+
+**`entrypoint.sh`**
+
+```sh
+#!/bin/sh
+set -e
+
+# Generate runtime env.js from the template + Docker environment variable
+# Writes into the nginx web root so the browser can fetch it at /assets/env.js
+
+TEMPLATE="/usr/share/nginx/html/assets/env.template.js"
+TARGET="/usr/share/nginx/html/assets/env.js"
+
+if [ ! -f "$TEMPLATE" ]; then
+  echo "ERROR: Missing template: $TEMPLATE"
+  exit 1
+fi
+
+if [ -z "$DEEPHAVEN_PSK" ]; then
+  echo "WARNING: DEEPHAVEN_PSK is empty; env.js will contain an empty value."
+  DEEPHAVEN_PSK=""
+fi
+
+# Replace placeholder with runtime value
+# Using sed (available in alpine) — no envsubst needed.
+sed "s|__DEEPHAVEN_PSK__|${DEEPHAVEN_PSK}|g" "$TEMPLATE" > "$TARGET"
+
+# Start nginx in foreground
+exec nginx -g 'daemon off;'
+```
+
+---
+
+# 3) Dockerfile (Angular + Nginx)
+
+This assumes your Angular build output is `dist/thales-edge-ui` (adjust if different).
+
+**`Dockerfile`**
+
+```dockerfile
+FROM nginx:alpine
+
+# Copy built Angular files
+COPY dist/thales-edge-ui/ /usr/share/nginx/html/
+
+# Copy the runtime template into the served assets folder
+COPY src/assets/env.template.js /usr/share/nginx/html/assets/env.template.js
+
+# Copy entrypoint that will generate env.js at container startup
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
+```
+
+---
+
+# 4) Build the image
+
+From the project root:
+
+```bash
+# build Angular first (example)
+npm ci
+npm run build
+
+# build docker image
+docker build -t thales-edge-ui:latest .
+```
+
+---
+
+# 5) Run with PSK (your main goal)
+
+```bash
+docker run -d \
+  -p 4200:80 \
+  --name thales-edge-ui \
+  -e DEEPHAVEN_PSK=79s9pkxpmri0 \
+  thales-edge-ui:latest
+```
+
+Now your Angular app can read it from:
+
+- `window.__env.DEEPHAVEN_PSK`
+    
+- and the browser can fetch `assets/env.js`
+    
+
+---
+
+# 6) Verify it worked (super useful)
+
+### Check the generated file inside container
+
+```bash
+docker exec -it thales-edge-ui sh -c "cat /usr/share/nginx/html/assets/env.js"
+```
+
+### Or from browser / curl
+
+```bash
+curl -s http://localhost:4200/assets/env.js
+```
+
+You should see something like:
+
+```js
+window.__env = { DEEPHAVEN_PSK: "79s9pkxpmri0" };
+```
+
+---
+
+# Do you need to run entrypoint.sh every time?
+
+✅ **No manual step.**  
+`entrypoint.sh` runs automatically **every time the container starts**.
+
+## When PSK changes, what do you do?
+
+You just **recreate the container** with the new env var:
+
+```bash
+docker rm -f thales-edge-ui
+
+docker run -d \
+  -p 4200:80 \
+  --name thales-edge-ui \
+  -e DEEPHAVEN_PSK=NEW_VALUE_HERE \
+  thales-edge-ui:latest
+```
+
+That’s it. `entrypoint.sh` will generate a new `env.js` with the new PSK.
+
+---
+
+## One important warning (security)
+
+This approach **exposes the PSK to anyone who can open the UI** (they can read `assets/env.js` or DevTools). If that PSK is sensitive, the safer approach is keeping it in the backend only.
+
+---
+
+If you tell me your actual Angular dist folder name (what shows under `dist/`), I’ll adjust the Dockerfile `COPY dist/...` line to match exactly so you can paste/run without edits.
