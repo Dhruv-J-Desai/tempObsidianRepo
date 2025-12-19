@@ -3,133 +3,104 @@
 - Move the upsert logic from Angular to DeepHaven
 - Look at Metrics View
 - Try to tune the performance of Streaming Ingestion SDK while doing SCD2-merge
-That pattern is **super consistent** with one thing:
+It _might_ be blocked, but not because it’s “hacky” — because some orgs lock down images and runtimes in a few common ways.
 
-- With `-d` (detached), the container keeps running **only if the main process stays in the foreground**.
-    
-- If your Deephaven process (or your startup “app” script) **exits immediately**, Docker considers the container “done” and it stops.
-    
-- With `--rm -it`, it _looks_ “up” because you’re attached and seeing output, but the real question is: does the **Deephaven process stay alive**, or are you just sitting in an interactive shell / different entrypoint?
+Here’s what could block it, and the safer alternatives.
+
+## What could block that `/bin/sh -c "envsubst ... && nginx ..."` approach
+
+1. **Your image might not include `envsubst`**
     
 
-Let’s make this deterministic.
+- `envsubst` usually comes from `gettext` / `gettext-base`.
+    
+- Many minimal images (including some nginx variants) don’t have it.
+    
+- In that case you’ll get: `envsubst: not found`.
+    
+
+2. **Security policies may restrict overriding the container command**
+    
+
+- Some platforms (or internal policies) require the image’s default `CMD/ENTRYPOINT` not be overridden.
+    
+- If you’re running plain Docker on WEnix, this is less common, but CI/K8s admission policies can enforce it.
+    
+
+3. **Read-only filesystem**
+    
+
+- If the container FS is read-only, you can’t write `/usr/share/nginx/html/env.js`.
+    
+- You’d see “read-only file system” errors.
+    
+
+4. **Running as non-root / permission issues**
+    
+
+- If nginx image runs as non-root and the html dir isn’t writable, writing `env.js` may fail.
+    
+
+None of these are guaranteed; they’re just the usual “org hardening” points.
 
 ---
 
-## 1) Run detached **and immediately check exit code + logs**
+## How to check quickly (no guessing)
 
-Do:
-
-```bash
-docker rm -f deephaven 2>/dev/null || true
-
-docker run -d --name deephaven \
-  -p 10000:10000 \
-  -e DEEPHAVEN_AUTH_TYPE=psk \
-  -e DEEPHAVEN_PSK=my-fixed-psk \
-  -e START_OPTS="-Ddeephaven.application.dir=/app.d" \
-  -v /shared-resources/deephaven/app.d:/app.d:ro \
-  deephaven-local:1.3.0
-
-sleep 2
-docker ps -a --filter name=deephaven
-docker inspect deephaven --format='ExitCode={{.State.ExitCode}} OOMKilled={{.State.OOMKilled}} Error={{.State.Error}}'
-docker logs deephaven --tail 300
-```
-
-**This will tell us exactly why it stops.**
-
-Most likely you’ll see your `orchestrator.py` throwing an exception, and Deephaven exits.
-
----
-
-## 2) Important: your `.app` startup script can crash the whole server
-
-If the python app script errors during startup, Deephaven may fail fast (container exits in `-d`).
-
-To confirm, temporarily run Deephaven **without** application mode:
+Run this on WEnix:
 
 ```bash
-docker rm -f deephaven 2>/dev/null || true
-
-docker run -d --name deephaven \
-  -p 10000:10000 \
-  -e DEEPHAVEN_AUTH_TYPE=psk \
-  -e DEEPHAVEN_PSK=my-fixed-psk \
-  deephaven-local:1.3.0
-
-sleep 2
-docker ps --filter name=deephaven
-docker logs deephaven --tail 80
+docker run --rm -it thales-edge-ui /bin/sh -c "which envsubst || echo 'no envsubst'; id; ls -ld /usr/share/nginx/html"
 ```
 
-- If this stays up ✅ → your **app mode script is the culprit**
+Interpretation:
+
+- If it prints `no envsubst` → you need the alternative below.
     
-- If it still exits ❌ → the problem is Deephaven startup itself (less likely since you had it running earlier)
+- If `/usr/share/nginx/html` isn’t writable → you need to write somewhere else (or bake it at build time).
+    
+- If `/bin/sh` doesn’t exist → image is super minimal; then this method won’t work.
     
 
 ---
 
-## 3) The “--rm -it works” case: make sure you’re not accidentally running a shell
+## If your org blocks it: best alternatives
 
-Many times people do:
+### ✅ Alternative A (most org-friendly): **Bake `env.js` at build time**
 
-```bash
-docker run --rm -it image bash
-```
+If your PSK is not meant to be secret (dev-only), you can build an image per environment.  
+Downside: you must rebuild when PSK changes.
 
-…and that “stays up” because `bash` is running, not Deephaven.
+### ✅ Alternative B (most enterprise-safe): **Don’t send PSK to Angular at all**
 
-So: what exact `--rm -it` command are you running?  
-(You don’t need to answer with a question—just paste it here.)
+Keep `DEEPPHAVEN_PSK` only in backend, and UI calls backend.  
+This avoids leaking PSK to every browser.
+
+### ✅ Alternative C (still runtime, but less “command override”): entrypoint script
+
+Yes it’s “extra work”, but it’s also the most standard pattern and least likely to be blocked, because:
+
+- you don’t override command at runtime
+    
+- it’s part of the image
+    
+- security scanners understand it
+    
 
 ---
 
-## 4) Best practice: run orchestrator **after** server is up (so it can’t kill startup)
+## Biggest non-org issue: PSK exposure
 
-If your orchestrator is something that can fail (network calls, databricks creds, etc.), don’t run it as “startup app”. Instead:
+Even if your org allows it, injecting `DEEPPHAVEN_PSK` into browser JS means any user can see it.
 
-### Start Deephaven normally (detached)
-
-```bash
-docker rm -f deephaven 2>/dev/null || true
-docker run -d --name deephaven \
-  -p 10000:10000 \
-  -e DEEPHAVEN_AUTH_TYPE=psk \
-  -e DEEPHAVEN_PSK=my-fixed-psk \
-  deephaven-local:1.3.0
-```
-
-### Then run orchestrator **manually** (or as a second container)
-
-```bash
-docker exec -it deephaven bash -lc "python3.9 /app.d/orchestrator.py"
-```
-
-This way: if `orchestrator.py` crashes, it won’t bring down the server.
+If that PSK gives access to anything important, your security team _will_ care.
 
 ---
 
-## What I need from you (one paste)
-
-Paste the output of this (it’s the fastest way to finish):
+If you paste the output of this command:
 
 ```bash
-docker logs deephaven --tail 300
+docker inspect --format='Entrypoint={{.Config.Entrypoint}} Cmd={{.Config.Cmd}} User={{.Config.User}}' thales-edge-ui
 ```
 
-If the container exited, also paste:
-
-```bash
-docker inspect deephaven --format='ExitCode={{.State.ExitCode}} Error={{.State.Error}}'
-```
-
-Once I see that log, I’ll tell you whether:
-
-- your `.app` file format is wrong,
-    
-- the script is failing on import,
-    
-- the script is exiting immediately,
-    
-- or Deephaven is configured to shut down after running the app.
+…I can tell you which method is most likely to work in your org **without** getting blocked.
