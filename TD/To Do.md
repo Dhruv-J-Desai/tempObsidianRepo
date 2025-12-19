@@ -3,187 +3,122 @@
 - Move the upsert logic from Angular to DeepHaven
 - Look at Metrics View
 - Try to tune the performance of Streaming Ingestion SDK while doing SCD2-merge
-Nice — you’re 90% there. The **only problem** is: in your current image (`ubi8/nginx-120`), the web root is **not** `/usr/share/nginx/html`.
+Yep — and this is the _exact_ Docker networking trap:
 
-From your Dockerfile, you copy Angular output to:
+### Why Windows browser can use `localhost`, but your **container** can’t
 
-```
-/opt/app-root/src/
-```
+You have **three different “localhost” worlds**:
 
-So your `entrypoint.sh` must write `env.js` into **that** folder (and the template must also live there).
-
----
-
-## 1) Fix `entrypoint.sh` paths for `ubi8/nginx-120`
-
-Use this version:
-
-```sh
-#!/bin/sh
-set -e
-
-# RHEL nginx-120 serves content from /opt/app-root/src
-DOCROOT="/opt/app-root/src"
-TEMPLATE="$DOCROOT/assets/env.template.js"
-TARGET="$DOCROOT/assets/env.js"
-
-if [ ! -f "$TEMPLATE" ]; then
-  echo "ERROR: Missing template: $TEMPLATE"
-  echo "       Ensure env.template.js is copied into dist assets."
-  exit 1
-fi
-
-if [ -z "$DEEPHAVEN_PSK" ]; then
-  echo "WARNING: DEEPHAVEN_PSK is empty; env.js will contain an empty value."
-  DEEPHAVEN_PSK=""
-fi
-
-# Replace placeholder with runtime value
-sed "s|__DEEPHAVEN_PSK__|${DEEPHAVEN_PSK}|g" "$TEMPLATE" > "$TARGET"
-
-# Start nginx in foreground (works in this image too)
-exec nginx -g 'daemon off;'
-```
-
-✅ This matches your runtime image layout.
-
----
-
-## 2) Update your Dockerfile (runtime stage)
-
-In **Stage 2**, after copying the dist, also copy `entrypoint.sh` and ensure permissions.
-
-Here’s the **full Stage 2** you should use:
-
-```dockerfile
-############################################
-# Stage 2: Runtime Image (Nginx)
-############################################
-FROM registry.access.redhat.com/ubi8/nginx-120
-
-# Copy Angular build output into nginx docroot
-COPY --from=build /app/dist/thales-edge/browser /opt/app-root/src/
-
-# Copy entrypoint into image
-COPY entrypoint.sh /opt/app-root/entrypoint.sh
-
-USER root
-RUN chmod +x /opt/app-root/entrypoint.sh \
-    && chgrp -R 0 /opt/app-root/src \
-    && chmod -R g+rwX /opt/app-root/src \
-    && chgrp -R 0 /opt/app-root \
-    && chmod -R g+rwX /opt/app-root
-USER 1001
-
-EXPOSE 8080
-
-ENTRYPOINT ["/opt/app-root/entrypoint.sh"]
-```
-
-**Important:** remove the old `CMD ["nginx", "-g", "daemon off;"]` because the entrypoint will start nginx.
-
----
-
-## 3) One-time Angular changes you MUST have
-
-### A) Ensure the template exists in your dist output
-
-Create:
-
-**`src/assets/env.template.js`**
-
-```js
-window.__env = {
-  DEEPHAVEN_PSK: "__DEEPHAVEN_PSK__"
-};
-```
-
-When you run `npm run build`, it will end up in:
-
-```
-dist/.../assets/env.template.js
-```
-
-### B) Load `env.js` in `src/index.html`
-
-Add this before Angular scripts:
-
-```html
-<script src="assets/env.js"></script>
-```
-
----
-
-## 4) Build and run
-
-### Build image
-
-```bash
-docker build -t thales-edge-ui:latest .
-```
-
-### Run with PSK
-
-```bash
-docker run -d \
-  -p 4200:8080 \
-  --name thales-edge-ui \
-  -e DEEPHAVEN_PSK=79s9pkxpmri0 \
-  thales-edge-ui:latest
-```
-
----
-
-## 5) Verify it worked (this will save you time)
-
-### Check the template exists inside container
-
-```bash
-docker exec -it thales-edge-ui sh -c "ls -ltra /opt/app-root/src/assets | head"
-```
-
-### Check `env.js` got generated
-
-```bash
-docker exec -it thales-edge-ui sh -c "cat /opt/app-root/src/assets/env.js"
-```
-
-### Check from host
-
-```bash
-curl -s http://localhost:4200/assets/env.js
-```
-
----
-
-## Do you need to run `entrypoint.sh` manually each time PSK changes?
-
-✅ **No. Never manually.**
-
-- `entrypoint.sh` runs **automatically** every time the container starts.
-    
-- If PSK changes, just recreate the container:
+1. **Windows browser**
     
 
-```bash
-docker rm -f thales-edge-ui
+- `http://localhost:10000` means **your Windows machine**
+    
+- It works because the Deephaven port is exposed/forwarded to Windows (Docker Desktop, SSH tunnel, or port mapping)
+    
 
-docker run -d \
-  -p 4200:8080 \
-  --name thales-edge-ui \
-  -e DEEPHAVEN_PSK=NEW_PSK_VALUE \
-  thales-edge-ui:latest
-```
+2. **WEnix host (Linux)**
+    
 
-No rebuild needed for PSK changes.
+- `localhost:10000` means **the WEnix host**
+    
+- It works because Deephaven is published on the host (e.g., `-p 10000:10000`)
+    
+
+3. **dh-orchestrator container**
+    
+
+- `localhost:10000` means **inside the dh-orchestrator container itself**
+    
+- ❌ Deephaven is _not_ running inside that container → **connection refused**
+    
+
+So the fact that Windows browser can reach Deephaven with `localhost` does **not** mean your container can.
 
 ---
 
-If you paste the output of:
+## Prove it (run the check _inside_ the orchestrator container)
+
+Right now your “CONNECTED” check looks like it was run on the host. Do it inside the container:
 
 ```bash
-docker exec -it thales-edge-ui sh -c "ls -ltra /opt/app-root/src/assets; echo '---'; cat /opt/app-root/src/index.html | head -50"
+docker exec -it dh-orchestrator sh -c 'echo > /dev/tcp/localhost/10000 && echo CONNECTED || echo FAILED'
 ```
 
-…I can confirm in one shot whether (1) the template is present and (2) `index.html` is loading `assets/env.js`.
+Expected:
+
+- likely `FAILED` (because localhost in that container ≠ host)
+    
+
+Now try using the **host gateway**:
+
+```bash
+docker exec -it dh-orchestrator sh -c 'echo > /dev/tcp/host.docker.internal/10000 && echo CONNECTED || echo FAILED'
+```
+
+If that gives `CONNECTED`, you’ve confirmed the fix.
+
+---
+
+## Fix option 1: Deephaven is running on the WEnix host (or published to host)
+
+Run orchestrator with host-gateway mapping and point to it:
+
+```bash
+docker run -d --name dh-orchestrator \
+  -p 8081:8081 \
+  --add-host=host.docker.internal:host-gateway \
+  -e DEEPHAVEN_HOST=host.docker.internal \
+  -e DEEPHAVEN_PORT=10000 \
+  -e DH_PSK=<your_psk> \
+  dh-orchestrator:latest
+```
+
+✅ This makes the container reach “the host’s localhost”.
+
+---
+
+## Fix option 2 (better): Deephaven is another container
+
+Put both containers on the same Docker network and use the **container name**:
+
+```bash
+docker network create dh-net
+
+docker run -d --name deephaven --network dh-net \
+  -p 10000:10000 \
+  deephaven-local:1.2.0
+
+docker run -d --name dh-orchestrator --network dh-net \
+  -p 8081:8081 \
+  -e DEEPHAVEN_HOST=deephaven \
+  -e DEEPHAVEN_PORT=10000 \
+  -e DH_PSK=<your_psk> \
+  dh-orchestrator:latest
+```
+
+Then inside orchestrator, you use `deephaven:10000` (not localhost).
+
+---
+
+## What to change in your app config
+
+Wherever you currently have:
+
+- `DEEPHAVEN_HOST=localhost`  
+    change it to:
+    
+- `host.docker.internal` (if Deephaven is via host port)  
+    **or**
+    
+- `deephaven` (if Deephaven is another container on same network)
+    
+
+---
+
+If you tell me **how Deephaven is running** right now:
+
+- “as a docker container named ___” **or**
+    
+- “directly on host”  
+    …I’ll give you the exact final `docker run` line for your setup (no guessing).
