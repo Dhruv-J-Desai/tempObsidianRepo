@@ -1,119 +1,147 @@
-You’re **very close** — your proxy config screenshot is correct now (it includes `/io.deephaven.proto.`).  
-If you can open `http://localhost:10000/jsapi/dh-core.js` in Windows, Deephaven is reachable.
+Short answer: **Yes — very likely this `node:20.19-bullseye` image may be blocked on a corporate machine** ❗  
+But **you still have clean, compliant alternatives** that keep your setup intact.
 
-Now the remaining rule for **Option A (Angular dev proxy)** is:
-
-✅ **CoreClient base must be your Angular origin**, NOT Deephaven’s base URL.  
-Because the browser must go through the proxy (4200 → 10000).
-
-So in `deephaven.service.ts`, set it like this.
+I’ll break this down clearly and give you **safe options**.
 
 ---
 
-## ✅ Correct `deephaven.service.ts` for Option A (Angular proxy)
+## Why `node:20.19-bullseye` might be blocked
 
-### 1) Keep dynamic import through the proxy
+In most enterprise environments (WEnix / corporate laptops):
 
-```ts
-const proxyUrl = '/jsapi/dh-core.js';
-this.dh = (await import(/* @vite-ignore */ proxyUrl)).default;
-```
-
-### 2) CoreClient must use Angular origin (proxy host)
-
-```ts
-this.client = new this.dh.CoreClient(window.location.origin);
-```
-
-### 3) Login token (PSK) can still come from runtime env
-
-```ts
-const psk = (window as any).__env?.DEEPHAVEN_PSK;
-if (psk) {
-  await this.client.login({
-    type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
-    token: psk,
-  });
-}
-```
-
----
-
-## Full “known-good” `getClient()` block (copy/paste)
-
-```ts
-private async ensureDhLoaded(): Promise<void> {
-  if (this.dh) return;
-  const proxyUrl = '/jsapi/dh-core.js';
-  this.dh = (await import(/* @vite-ignore */ proxyUrl)).default;
-}
-
-private async getClient(): Promise<any> {
-  await this.ensureDhLoaded();
-  if (this.client) return this.client;
-
-  // IMPORTANT for Option A: use Angular origin so proxy is used
-  this.client = new this.dh.CoreClient(window.location.origin);
-
-  const psk = (window as any).__env?.DEEPHAVEN_PSK;
-  if (psk) {
-    await this.client.login({
-      type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
-      token: psk,
-    });
-  }
-
-  return this.client;
-}
-```
-
-✅ That’s it for Option A.
-
----
-
-## Why your current code is risky
-
-In your screenshot you have:
-
-```ts
-this.client = new this.dh.CoreClient(this.dhBaseUrl());
-```
-
-If `dhBaseUrl()` becomes `http://localhost:10000`, then the client will try to call gRPC endpoints directly from the browser to 10000 (CORS + ws issues), and you’ll see disconnect problems again.
-
-**For Option A, don’t use `dhBaseUrl()` at all.**
-
----
-
-## Quick “am I using the proxy?” test
-
-Open DevTools → Network.
-
-When the app runs, you should see requests like:
-
-- `http://localhost:4200/io.deephaven.proto...`
+- ❌ **Docker Hub images** (`node:*`, `nginx:*`, `ubuntu:*`) are often **blocked**
     
-- `http://localhost:4200/jsapi/...`
+- ❌ Pulling public images may be disabled
+    
+- ❌ Security scanners may reject Debian-based images
+    
+- ✅ **Internal Nexus / Artifactory images ARE allowed**
+    
+- ✅ **RedHat UBI images ARE allowed**
     
 
-NOT:
-
-- `http://localhost:10000/io.deephaven.proto...`
-    
-
-If you see `:4200`, proxy is being used correctly.
-
----
-
-## One more important thing: restart Angular after proxy edits
-
-Proxy changes don’t apply until you restart:
+So yes — **this command may fail** on your org machine:
 
 ```bash
-Ctrl+C
-ng serve --proxy-config proxy.conf.json
+node:20.19-bullseye
 ```
 
 ---
 
-If you send **one screenshot of your `angular.json` serve config** (or the exact `ng serve ...` command you’re running), I’ll tell you if the proxy file is actually being picked up.
+## ✅ What DOES work in corporate environments
+
+### OPTION 1 — Use your **already-approved Angular image** (BEST)
+
+You already built:
+
+```
+thales-edge:latest
+```
+
+That image:
+
+- Uses **UBI**
+    
+- Has **Node 20 installed via tarball**
+    
+- Is **org-compliant**
+    
+
+So instead of pulling `node:20.19-bullseye`, do this 👇
+
+```bash
+docker run --name thales-edge-dev --rm -it \
+  --network dh-net \
+  -p 4200:4200 \
+  -v "%cd%":/app \
+  -w /app \
+  thales-edge:latest \
+  bash -lc "npm ci && npx ng serve --host 0.0.0.0 --port 4200 --proxy-config proxy.conf.json"
+```
+
+✅ No public image  
+✅ No Node upgrade on host  
+✅ Fully compliant  
+✅ Same dev behavior
+
+---
+
+### OPTION 2 — Use **internal Nexus Node image** (if available)
+
+If your org has something like:
+
+```
+nexus.td.com/node:20
+```
+
+Then use:
+
+```bash
+FROM nexus.td.com/node:20
+```
+
+or at runtime:
+
+```bash
+nexus.td.com/node:20
+```
+
+But this depends on what **your Nexus actually hosts**.
+
+---
+
+### OPTION 3 — Use **Angular PROD mode only (no ng serve)**
+
+If Dev mode is too restricted, fall back to:
+
+```bash
+npm run build
+docker build -t thales-edge .
+docker run -d -p 4200:8080 thales-edge
+```
+
+No Node needed at runtime.  
+This is the **cleanest enterprise-safe approach**.
+
+---
+
+## ❌ What will NOT work
+
+|Approach|Why|
+|---|---|
+|Installing Node 20 on host|❌ Restricted|
+|Using `node:*` from Docker Hub|❌ Blocked|
+|Running `ng serve` on host|❌ Node version mismatch|
+|Browser → Deephaven directly|❌ CORS + DNS|
+
+---
+
+## Final recommendation (what YOU should do)
+
+Since you already **successfully built `thales-edge` with Node 20**:
+
+👉 **Use that image for dev-mode `ng serve`**
+
+```bash
+thales-edge:latest
+```
+
+This keeps:
+
+- your **proxy config**
+    
+- your **Angular Dev UX**
+    
+- your **corporate compliance**
+    
+
+---
+
+If you want, next I can:
+
+- give you a **single unified script** (`run-dev.sh`)
+    
+- or help you **convert dev proxy → nginx proxy** so you never need `ng serve` again
+    
+
+Just tell me 👍
