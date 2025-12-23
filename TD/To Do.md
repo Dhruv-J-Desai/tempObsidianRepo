@@ -1,131 +1,119 @@
-I’m going to pinpoint _exactly_ why it’s still trying to connect to `ws://localhost:4200` (which means the proxy isn’t being used), then give you the precise fixes.
+You’re **very close** — your proxy config screenshot is correct now (it includes `/io.deephaven.proto.`).  
+If you can open `http://localhost:10000/jsapi/dh-core.js` in Windows, Deephaven is reachable.
 
-That screenshot is the key: **it’s still trying to call Deephaven gRPC endpoints at the ROOT path on your Angular origin**:
+Now the remaining rule for **Option A (Angular dev proxy)** is:
 
-`ws://localhost:4200/io.deephaven.proto.backplane.grpc.ConfigService/GetConfigurationConstants`
+✅ **CoreClient base must be your Angular origin**, NOT Deephaven’s base URL.  
+Because the browser must go through the proxy (4200 → 10000).
 
-✅ This means: **your proxy config is incomplete**.  
-You proxied only:
-
-- `/jsapi`
-    
-- `/grpc-web`
-    
-
-…but Deephaven’s JS client is actually calling:
-
-- **`/io.deephaven.proto.*`** (this is the gRPC-web endpoint path)
-    
-
-So the browser hits Angular (4200) → Angular doesn’t know that path → disconnect loop.
+So in `deephaven.service.ts`, set it like this.
 
 ---
 
-# Fix (Option A / Angular dev server): update proxy.conf.json
+## ✅ Correct `deephaven.service.ts` for Option A (Angular proxy)
 
-Your current proxy has:
+### 1) Keep dynamic import through the proxy
 
-```json
-"/jsapi": {...},
-"/grpc-web": {...}
+```ts
+const proxyUrl = '/jsapi/dh-core.js';
+this.dh = (await import(/* @vite-ignore */ proxyUrl)).default;
 ```
 
-✅ Replace it with this (add the missing Deephaven gRPC paths):
-
-```json
-{
-  "/jsapi": {
-    "target": "http://localhost:10000",
-    "changeOrigin": true,
-    "secure": false,
-    "ws": true
-  },
-  "/grpc-web": {
-    "target": "http://localhost:10000",
-    "changeOrigin": true,
-    "secure": false,
-    "ws": true
-  },
-
-  "/io.deephaven.proto.": {
-    "target": "http://localhost:10000",
-    "changeOrigin": true,
-    "secure": false,
-    "ws": true
-  }
-}
-```
-
-### Then restart Angular (important)
-
-Stop `ng serve` and run again:
-
-```bash
-ng serve --proxy-config proxy.conf.json
-```
-
----
-
-# DeephavenService.ts (Option A): what it should be
-
-✅ **If you are using Angular dev proxy**, then **YES** you should keep using `window.location.origin`:
+### 2) CoreClient must use Angular origin (proxy host)
 
 ```ts
 this.client = new this.dh.CoreClient(window.location.origin);
 ```
 
-Because Angular is acting as the reverse proxy for Deephaven.
+### 3) Login token (PSK) can still come from runtime env
 
-So for Option A:
-
-- **No need to hardcode `http://localhost:10000` in CoreClient**
-    
-- Just make sure proxy routes include `/io.deephaven.proto.`
-    
-
----
-
-# Quick verification (do this in browser)
-
-After restart, open these in the browser:
-
-1. ✅ should show JS file (not 404):
-    
-
-- `http://localhost:4200/jsapi/dh-core.js`
-    
-
-2. ✅ should NOT be 404 anymore (may show 405/400, that’s fine):
-    
-
-- `http://localhost:4200/io.deephaven.proto.backplane.grpc.ConfigService/GetConfigurationConstants`
-    
-
-If #2 stops being **404**, your proxy is correct.
-
----
-
-# If you are running thales-edge in Docker (nginx) instead of ng serve
-
-Then Angular proxy file is NOT used. In that case you must add an nginx rule too:
-
-```nginx
-location ^~ /io.deephaven.proto. {
-  proxy_pass http://deephaven:10000;
-  proxy_http_version 1.1;
-  proxy_set_header Upgrade $http_upgrade;
-  proxy_set_header Connection "upgrade";
+```ts
+const psk = (window as any).__env?.DEEPHAVEN_PSK;
+if (psk) {
+  await this.client.login({
+    type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+    token: psk,
+  });
 }
 ```
 
-(And restart/rebuild the container.)
+---
+
+## Full “known-good” `getClient()` block (copy/paste)
+
+```ts
+private async ensureDhLoaded(): Promise<void> {
+  if (this.dh) return;
+  const proxyUrl = '/jsapi/dh-core.js';
+  this.dh = (await import(/* @vite-ignore */ proxyUrl)).default;
+}
+
+private async getClient(): Promise<any> {
+  await this.ensureDhLoaded();
+  if (this.client) return this.client;
+
+  // IMPORTANT for Option A: use Angular origin so proxy is used
+  this.client = new this.dh.CoreClient(window.location.origin);
+
+  const psk = (window as any).__env?.DEEPHAVEN_PSK;
+  if (psk) {
+    await this.client.login({
+      type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+      token: psk,
+    });
+  }
+
+  return this.client;
+}
+```
+
+✅ That’s it for Option A.
 
 ---
 
-## Why you’re seeing `ws://localhost:4200/...`
+## Why your current code is risky
 
-Because the JS client connects to **the CoreClient base URL** (your Angular origin), and expects your proxy to forward all Deephaven API paths. Right now it forwards only `/jsapi` and `/grpc-web`, but Deephaven also uses `/io.deephaven.proto.*`.
+In your screenshot you have:
+
+```ts
+this.client = new this.dh.CoreClient(this.dhBaseUrl());
+```
+
+If `dhBaseUrl()` becomes `http://localhost:10000`, then the client will try to call gRPC endpoints directly from the browser to 10000 (CORS + ws issues), and you’ll see disconnect problems again.
+
+**For Option A, don’t use `dhBaseUrl()` at all.**
 
 ---
 
-If you want, send **one screenshot of your `ng serve` command** (or tell me if you’re using Docker nginx), and I’ll give you the exact final config for that one path only.
+## Quick “am I using the proxy?” test
+
+Open DevTools → Network.
+
+When the app runs, you should see requests like:
+
+- `http://localhost:4200/io.deephaven.proto...`
+    
+- `http://localhost:4200/jsapi/...`
+    
+
+NOT:
+
+- `http://localhost:10000/io.deephaven.proto...`
+    
+
+If you see `:4200`, proxy is being used correctly.
+
+---
+
+## One more important thing: restart Angular after proxy edits
+
+Proxy changes don’t apply until you restart:
+
+```bash
+Ctrl+C
+ng serve --proxy-config proxy.conf.json
+```
+
+---
+
+If you send **one screenshot of your `angular.json` serve config** (or the exact `ng serve ...` command you’re running), I’ll tell you if the proxy file is actually being picked up.
