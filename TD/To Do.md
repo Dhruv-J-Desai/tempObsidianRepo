@@ -1,147 +1,115 @@
-Short answer: **Yes — very likely this `node:20.19-bullseye` image may be blocked on a corporate machine** ❗  
-But **you still have clean, compliant alternatives** that keep your setup intact.
+Perfect — your **nginx.conf screenshot confirms the root cause**.
 
-I’ll break this down clearly and give you **safe options**.
+Your config says:
 
----
+```nginx
+location /jsapi/ {
+  proxy_pass http://deephaven-local:10000/jsapi/;
+  proxy_set_header Host $host;
+}
+```
 
-## Why `node:20.19-bullseye` might be blocked
+But your **actual Deephaven container name** (from your earlier `docker ps`) is **`deephaven-local`**?  
+Wait — in the screenshot it’s `deephaven-local` **with a hyphen**, but earlier you were using names like `deephaven-local` / `deephaven` / `deephaven-local:1.3.0`. If the container name is _not exactly_ `deephaven-local`, nginx will try to resolve a hostname that doesn’t exist and you’ll get exactly what you see: **ERR_EMPTY_RESPONSE**.
 
-In most enterprise environments (WEnix / corporate laptops):
+### ✅ Fix: point nginx to the _real_ container name on `dh-net`
 
-- ❌ **Docker Hub images** (`node:*`, `nginx:*`, `ubuntu:*`) are often **blocked**
-    
-- ❌ Pulling public images may be disabled
-    
-- ❌ Security scanners may reject Debian-based images
-    
-- ✅ **Internal Nexus / Artifactory images ARE allowed**
-    
-- ✅ **RedHat UBI images ARE allowed**
-    
-
-So yes — **this command may fail** on your org machine:
+Run this and look at the **NAMES** column:
 
 ```bash
-node:20.19-bullseye
+docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Ports}}"
+```
+
+Whatever name you see for Deephaven (example: `deephaven` or `deephaven-local`), use that in nginx.
+
+For example, if your Deephaven container name is `deephaven` then nginx must be:
+
+```nginx
+location /jsapi/ {
+  proxy_pass http://deephaven:10000/jsapi/;
+  proxy_set_header Host $host;
+}
+
+location /grpc-web/ {
+  proxy_pass http://deephaven:10000/grpc-web/;
+  proxy_set_header Host $host;
+}
+
+location /dh/ {
+  proxy_pass http://deephaven:10000/dh/;
+  proxy_http_version 1.1;
+  proxy_set_header Upgrade $http_upgrade;
+  proxy_set_header Connection "upgrade";
+  proxy_set_header Host $host;
+}
 ```
 
 ---
 
-## ✅ What DOES work in corporate environments
+## ✅ Also: you are missing one proxy route your UI needs
 
-### OPTION 1 — Use your **already-approved Angular image** (BEST)
+Your browser errors earlier included:
 
-You already built:
+`/io.deephaven.proto.backplane.grpc.ConfigService/...`
 
+That is **NOT** `/grpc-web/` and **NOT** `/dh/`.
+
+So add this too:
+
+```nginx
+location /io.deephaven.proto. {
+  proxy_pass http://<DEEPhaven_container_name>:10000;
+  proxy_http_version 1.1;
+  proxy_set_header Upgrade $http_upgrade;
+  proxy_set_header Connection "upgrade";
+  proxy_set_header Host $host;
+}
 ```
-thales-edge:latest
-```
 
-That image:
+Replace `<DEEPhaven_container_name>` with the real name.
 
-- Uses **UBI**
-    
-- Has **Node 20 installed via tarball**
-    
-- Is **org-compliant**
-    
+---
 
-So instead of pulling `node:20.19-bullseye`, do this 👇
+## ✅ Quick verification (this will tell us instantly)
+
+Run these commands:
+
+### 1) From inside thales-edge, can it reach Deephaven?
 
 ```bash
-docker run --name thales-edge-dev --rm -it \
-  --network dh-net \
-  -p 4200:4200 \
-  -v "%cd%":/app \
-  -w /app \
-  thales-edge:latest \
-  bash -lc "npm ci && npx ng serve --host 0.0.0.0 --port 4200 --proxy-config proxy.conf.json"
+docker exec -it thales-edge sh -lc "getent hosts deephaven-local || true; getent hosts deephaven || true"
 ```
 
-✅ No public image  
-✅ No Node upgrade on host  
-✅ Fully compliant  
-✅ Same dev behavior
-
----
-
-### OPTION 2 — Use **internal Nexus Node image** (if available)
-
-If your org has something like:
-
-```
-nexus.td.com/node:20
-```
-
-Then use:
+### 2) Can thales-edge fetch dh-core.js through nginx proxy?
 
 ```bash
-FROM nexus.td.com/node:20
+curl -I http://localhost:4200/jsapi/dh-core.js
 ```
 
-or at runtime:
+If #2 returns `200` (or `304`), your Angular page will stop showing ERR_EMPTY_RESPONSE.
+
+---
+
+## Why “Angular is working but Deephaven isn’t”
+
+Because `/` and your UI assets are served locally by nginx (`root /opt/app-root/src`), so UI loads fine.  
+Only Deephaven calls (`/jsapi`, `/grpc-web`, `/io.deephaven.proto`, `/dh`) depend on correct nginx upstream.
+
+---
+
+### Do this change and you’re done
+
+1. Update hostname in nginx.conf to match Deephaven container name exactly
+    
+2. Add the missing `location /io.deephaven.proto.` block
+    
+3. Rebuild/restart thales-edge image/container
+    
+
+If you paste the output of:
 
 ```bash
-nexus.td.com/node:20
+docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Ports}}"
 ```
 
-But this depends on what **your Nexus actually hosts**.
-
----
-
-### OPTION 3 — Use **Angular PROD mode only (no ng serve)**
-
-If Dev mode is too restricted, fall back to:
-
-```bash
-npm run build
-docker build -t thales-edge .
-docker run -d -p 4200:8080 thales-edge
-```
-
-No Node needed at runtime.  
-This is the **cleanest enterprise-safe approach**.
-
----
-
-## ❌ What will NOT work
-
-|Approach|Why|
-|---|---|
-|Installing Node 20 on host|❌ Restricted|
-|Using `node:*` from Docker Hub|❌ Blocked|
-|Running `ng serve` on host|❌ Node version mismatch|
-|Browser → Deephaven directly|❌ CORS + DNS|
-
----
-
-## Final recommendation (what YOU should do)
-
-Since you already **successfully built `thales-edge` with Node 20**:
-
-👉 **Use that image for dev-mode `ng serve`**
-
-```bash
-thales-edge:latest
-```
-
-This keeps:
-
-- your **proxy config**
-    
-- your **Angular Dev UX**
-    
-- your **corporate compliance**
-    
-
----
-
-If you want, next I can:
-
-- give you a **single unified script** (`run-dev.sh`)
-    
-- or help you **convert dev proxy → nginx proxy** so you never need `ng serve` again
-    
-
-Just tell me 👍
+I’ll tell you the **exact final nginx.conf** with the correct name filled in.
