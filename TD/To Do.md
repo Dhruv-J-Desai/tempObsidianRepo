@@ -1,225 +1,131 @@
-Alright — here’s the **complete, end-to-end fix** so your **Angular (nginx container)** can load Deephaven JS (`/jsapi/dh-core.js`) and connect to Deephaven **without using `deephaven-local` from the browser**.
+I’m going to pinpoint _exactly_ why it’s still trying to connect to `ws://localhost:4200` (which means the proxy isn’t being used), then give you the precise fixes.
 
-Right now your browser console shows:
+That screenshot is the key: **it’s still trying to call Deephaven gRPC endpoints at the ROOT path on your Angular origin**:
 
-- `GET http://localhost:4200/jsapi/dh-core.js` → **404**
+`ws://localhost:4200/io.deephaven.proto.backplane.grpc.ConfigService/GetConfigurationConstants`
+
+✅ This means: **your proxy config is incomplete**.  
+You proxied only:
+
+- `/jsapi`
     
-- fallback `http://deephaven-local:10000/jsapi/dh-core.js` → **ERR_NAME_NOT_RESOLVED**
-    
-
-That’s expected because:
-
-- `deephaven-local` is a **Docker hostname**, Windows browser can’t resolve it.
-    
-- Your **nginx config currently doesn’t proxy** `/jsapi` and `/grpc-web`, so it returns 404.
+- `/grpc-web`
     
 
-✅ Fix = **proxy Deephaven through nginx** and **in Angular always load dh-core via same-origin** (`/jsapi/...`), not via `DEEPhaven-local`.
+…but Deephaven’s JS client is actually calling:
+
+- **`/io.deephaven.proto.*`** (this is the gRPC-web endpoint path)
+    
+
+So the browser hits Angular (4200) → Angular doesn’t know that path → disconnect loop.
 
 ---
 
-# ✅ Target Architecture
+# Fix (Option A / Angular dev server): update proxy.conf.json
 
-Browser (Windows)  
-→ `http://localhost:4200/...` (nginx in container)  
-→ nginx proxies:
+Your current proxy has:
 
-- `/jsapi/*` → Deephaven container `http://deephaven-local:10000/jsapi/*`
-    
-- `/grpc-web/*` → Deephaven container `http://deephaven-local:10000/grpc-web/*`
-    
-- `/dh/*` (WebSocket) → Deephaven container `http://deephaven-local:10000/dh/*`
-    
-
-So the browser never talks to `deephaven-local` directly.
-
----
-
-# 1) Fix Angular code (most important)
-
-### ✅ In `environment.ts` (or env.template.js if runtime)
-
-Set base URL to **same origin**:
-
-```ts
-export const environment = {
-  production: false,
-  DEEPHAVEN_BASE_URL: '',     // IMPORTANT: empty => same-origin
-  DEEPHAVEN_PSK: '...'
-};
+```json
+"/jsapi": {...},
+"/grpc-web": {...}
 ```
 
-### ✅ In your DeephavenService use **same-origin** CoreClient URL
+✅ Replace it with this (add the missing Deephaven gRPC paths):
 
-Instead of:
+```json
+{
+  "/jsapi": {
+    "target": "http://localhost:10000",
+    "changeOrigin": true,
+    "secure": false,
+    "ws": true
+  },
+  "/grpc-web": {
+    "target": "http://localhost:10000",
+    "changeOrigin": true,
+    "secure": false,
+    "ws": true
+  },
 
-```ts
-new this.dh.CoreClient(environment.DEEPHAVEN_BASE_URL)
-```
-
-Use:
-
-```ts
-new this.dh.CoreClient(window.location.origin)
-```
-
-### ✅ And load dh-core.js only from `/jsapi/dh-core.js` (not absolute)
-
-Keep it simple:
-
-```ts
-private async ensureDhLoaded(): Promise<void> {
-  if (this.dh) return;
-  this.dh = (await import(/* @vite-ignore */ '/jsapi/dh-core.js')).default;
-}
-```
-
-That’s it. **No fallback to deephaven-local**.
-
----
-
-# 2) Add nginx reverse proxy (mandatory for docker build)
-
-You are using `registry.access.redhat.com/ubi8/nginx-120` and copying dist to `/opt/app-root/src/`.
-
-So you must provide nginx config file.
-
-## Create `nginx.conf` in your repo (example)
-
-```nginx
-worker_processes  1;
-
-events { worker_connections  1024; }
-
-http {
-  include       /etc/nginx/mime.types;
-  default_type  application/octet-stream;
-  sendfile      on;
-
-  server {
-    listen 8080;
-    server_name _;
-
-    root /opt/app-root/src;
-    index index.html;
-
-    # Angular SPA fallback
-    location / {
-      try_files $uri $uri/ /index.html;
-    }
-
-    # Deephaven JS API
-    location /jsapi/ {
-      proxy_pass http://deephaven-local:10000/jsapi/;
-      proxy_set_header Host $host;
-    }
-
-    # Deephaven gRPC-web
-    location /grpc-web/ {
-      proxy_pass http://deephaven-local:10000/grpc-web/;
-      proxy_set_header Host $host;
-    }
-
-    # Deephaven sessions/IDE websocket
-    location /dh/ {
-      proxy_pass http://deephaven-local:10000/dh/;
-      proxy_http_version 1.1;
-      proxy_set_header Upgrade $http_upgrade;
-      proxy_set_header Connection "upgrade";
-      proxy_set_header Host $host;
-    }
+  "/io.deephaven.proto.": {
+    "target": "http://localhost:10000",
+    "changeOrigin": true,
+    "secure": false,
+    "ws": true
   }
 }
 ```
 
----
+### Then restart Angular (important)
 
-# 3) Update Dockerfile (copy nginx.conf)
-
-Add these lines in your **runtime stage**:
-
-```dockerfile
-# Copy nginx config
-COPY nginx.conf /etc/nginx/nginx.conf
-```
-
-So runtime stage becomes:
-
-```dockerfile
-FROM registry.access.redhat.com/ubi8/nginx-120
-
-COPY --from=build /app/dist/thales-edge/browser /opt/app-root/src/
-COPY nginx.conf /etc/nginx/nginx.conf
-
-COPY entrypoint.sh /opt/app-root/entrypoint.sh
-...
-EXPOSE 8080
-ENTRYPOINT ["/opt/app-root/entrypoint.sh"]
-```
-
----
-
-# 4) Ensure containers are on same docker network
-
-Create a network:
+Stop `ng serve` and run again:
 
 ```bash
-docker network create dh-net
+ng serve --proxy-config proxy.conf.json
 ```
-
-Run Deephaven on it with name `deephaven-local`:
-
-```bash
-docker rm -f deephaven-local 2>/dev/null || true
-
-docker run -d --name deephaven-local --network dh-net \
-  -p 10000:10000 \
-  -e DEEPHAVEN_AUTH_TYPE=psk \
-  -e DEEPHAVEN_PSK=my-fixed-psk \
-  deephaven-local:1.2.0
-```
-
-Run Angular/nginx on same network:
-
-```bash
-docker rm -f thales-edge 2>/dev/null || true
-
-docker run -d --name thales-edge --network dh-net \
-  -p 4200:8080 \
-  -e DEEPHAVEN_PSK=my-fixed-psk \
-  thales-edge:latest
-```
-
-✅ Now nginx can resolve `deephaven-local` and proxy to it.
 
 ---
 
-# 5) Verify (these must work)
+# DeephavenService.ts (Option A): what it should be
 
-From Windows browser:
+✅ **If you are using Angular dev proxy**, then **YES** you should keep using `window.location.origin`:
 
-1. Angular app  
-    `http://localhost:4200/`
-    
-2. Deephaven JS file proxied through nginx  
-    `http://localhost:4200/jsapi/dh-core.js`  
-    ✅ should download JS, NOT 404
-    
-3. Deephaven health-ish check via proxy  
-    `http://localhost:4200/jsapi/`  
-    ✅ should return something (not required pretty)
-    
+```ts
+this.client = new this.dh.CoreClient(window.location.origin);
+```
 
-If #2 works, your dynamic import will work.
+Because Angular is acting as the reverse proxy for Deephaven.
+
+So for Option A:
+
+- **No need to hardcode `http://localhost:10000` in CoreClient**
+    
+- Just make sure proxy routes include `/io.deephaven.proto.`
+    
 
 ---
 
-# 6) Why your current setup fails (in 1 line)
+# Quick verification (do this in browser)
 
-Because you’re building Angular with nginx but still relying on **Angular dev proxy + docker hostname in browser**, and nginx isn’t proxying `/jsapi`.
+After restart, open these in the browser:
+
+1. ✅ should show JS file (not 404):
+    
+
+- `http://localhost:4200/jsapi/dh-core.js`
+    
+
+2. ✅ should NOT be 404 anymore (may show 405/400, that’s fine):
+    
+
+- `http://localhost:4200/io.deephaven.proto.backplane.grpc.ConfigService/GetConfigurationConstants`
+    
+
+If #2 stops being **404**, your proxy is correct.
 
 ---
 
-## If you want, paste your `entrypoint.sh`
+# If you are running thales-edge in Docker (nginx) instead of ng serve
 
-Some OpenShift nginx images need the config placed in `/etc/nginx/conf.d/default.conf` instead of `/etc/nginx/nginx.conf`. If your current container ignores my config, I’ll adjust it to the exact UBI nginx layout you’re using.
+Then Angular proxy file is NOT used. In that case you must add an nginx rule too:
+
+```nginx
+location ^~ /io.deephaven.proto. {
+  proxy_pass http://deephaven:10000;
+  proxy_http_version 1.1;
+  proxy_set_header Upgrade $http_upgrade;
+  proxy_set_header Connection "upgrade";
+}
+```
+
+(And restart/rebuild the container.)
+
+---
+
+## Why you’re seeing `ws://localhost:4200/...`
+
+Because the JS client connects to **the CoreClient base URL** (your Angular origin), and expects your proxy to forward all Deephaven API paths. Right now it forwards only `/jsapi` and `/grpc-web`, but Deephaven also uses `/io.deephaven.proto.*`.
+
+---
+
+If you want, send **one screenshot of your `ng serve` command** (or tell me if you’re using Docker nginx), and I’ll give you the exact final config for that one path only.
