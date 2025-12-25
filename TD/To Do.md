@@ -1,85 +1,138 @@
-If `cacerts-updated` is **a file on your host**, but Java says **“Is a directory”**, then one of these is happening:
+I see what’s happening from your screenshots:
 
-## What’s actually happening (most common)
-
-### 1) Docker created a directory **inside the container** because your host path didn’t resolve
-
-When you bind-mount a path and the **source path doesn’t exist** (or Docker can’t see it), Docker often ends up creating a **directory** at the target location.
-
-So inside the container, your path becomes a folder → Java throws **Is a directory**.
-
-This is super common in WEnix when:
-
-- the path is wrong by 1 character
+- In your **compose**, you set:
     
-- you’re running compose from a different machine/context
-    
-- permissions prevent Docker from reading the file
-    
-- you used a relative path that resolves differently
-    
-
----
-
-## Prove it in 10 seconds
-
-Run these **inside WEnix** (host), and then **inside the container**.
-
-### On WEnix host
-
-```bash
-ls -l /shared-resources/stack/bishowcase-backend/cacerts-updated
-file /shared-resources/stack/bishowcase-backend/cacerts-updated
-```
-
-You should see something like: `regular file` (or `Java KeyStore`).
-
-### Inside the container
-
-```bash
-docker exec -it bishowcase-backend sh -lc "ls -l /opt/app/shared-resources/stack/bishowcase-backend/cacerts-updated && file /opt/app/shared-resources/stack/bishowcase-backend/cacerts-updated"
-```
-
-If it prints `directory`, then the mount didn’t mount the file correctly.
-
----
-
-## The fix (do this even if filename has no .jks)
-
-Mount file-to-file explicitly (best practice):
 
 ```yaml
-bishowcase-backend:
-  volumes:
-    - /shared-resources/stack/bishowcase-backend/cacerts-updated:/run/secrets/truststore.jks:ro
-  environment:
-    SSL_TRUSTSTORE_LOCATION: /run/secrets/truststore.jks
-    SSL_TRUSTSTORE_PASSWORD: "${SSL_TRUSTSTORE_PASSWORD}"
+DEEPHAVEN_AUTH_TYPE: "psk"
+DEEPHAVEN_PSK: "dev-psk"
 ```
 
-Why this works: it forces Docker to treat the target as a **file**, not a directory path.
-
----
-
-## Two extra gotchas to check
-
-### 2) You accidentally added a trailing slash somewhere
-
-If you mount like:
-
-- `.../cacerts-updated/:/opt/app/.../cacerts-updated`  
-    Docker treats it like a **directory**.
+- But in the **DeepHaven log** it says it’s running at:
     
 
-So make sure **no trailing slash** on the source.
+`http://0.0.0.0:10000/?psk=shaouw7...`
 
-### 3) `cacerts-updated` is a file, but you mounted the parent folder and then pointed env to the folder
+So DeepHaven is **not reading `DEEPHAVEN_PSK`** from your compose. When it can’t find a PSK, it generates one and prints it in the URL.
 
-If your compose is mounting the folder `.../bishowcase-backend/` and inside it there is `cacerts-updated`, then the env must point to the file:
-
-✅ `/opt/app/.../cacerts-updated` (file)  
-❌ `/opt/app/.../cacerts-updated/` (directory)
+This almost always comes down to **one of these 3 causes**:
 
 ---
 
-If you paste your **exact compose snippet** for `bishowcase-backend` (the `volumes:` + `environment:` lines), I’ll point out the exact reason it became a directory and give the corrected version.
+## 1) Your image expects a different variable name (very likely in your custom `deephaven-local:*` image)
+
+Some DeepHaven entrypoints expect **`DH_PSK`** (or similar) and then map it internally.
+
+✅ Fix (make it bulletproof): set **both** env vars:
+
+```yaml
+deephaven:
+  environment:
+    DEEPHAVEN_AUTH_TYPE: psk
+    DEEPHAVEN_PSK: dev-psk
+    DH_PSK: dev-psk
+```
+
+Then restart cleanly (important):
+
+```bash
+docker compose down
+docker compose up --build
+```
+
+---
+
+## 2) Your container is not actually using the compose file you’re editing (very common)
+
+Sometimes you’re tailing logs from a container started earlier with `docker run` or a different compose file.
+
+✅ Verify what the running container _really_ has:
+
+```bash
+docker exec -it deephaven sh -lc 'printenv | egrep "DEEPHAVEN_AUTH_TYPE|DEEPHAVEN_PSK|DH_PSK"'
+```
+
+Expected output should include:
+
+- `DEEPHAVEN_PSK=dev-psk` (and/or DH_PSK)
+    
+
+If it’s missing → your compose changes are not being applied to that container.
+
+Also confirm the exact file being used:
+
+```bash
+docker compose config
+```
+
+This prints the fully-resolved compose (what Docker will actually run).
+
+---
+
+## 3) Your image entrypoint is overriding / generating PSK no matter what (custom script issue)
+
+Your log shows:
+
+- `/entrypoint.sh /etc...`
+    
+- plus the Deephaven URL printing a generated PSK
+    
+
+That suggests your custom image’s entrypoint script might be doing something like:
+
+- `DEEPHAVEN_PSK=$(openssl rand ...)` even if one is provided
+    
+- or reading from a different variable and ignoring `DEEPHAVEN_PSK`
+    
+
+✅ Quick proof inside the container:
+
+```bash
+docker exec -it deephaven sh -lc 'echo "PSK=$DEEPHAVEN_PSK DH_PSK=$DH_PSK"; ps -ef | head -n 50'
+```
+
+If env shows `DEEPHAVEN_PSK=dev-psk` but the URL still shows a random one → the entrypoint is overriding it.
+
+✅ Fix in that case: update the entrypoint logic to only generate when empty, like:
+
+```sh
+if [ -z "$DEEPHAVEN_PSK" ] && [ -z "$DH_PSK" ]; then
+  export DEEPHAVEN_PSK="$(some_random)"
+fi
+```
+
+---
+
+# The fastest “make it work” solution
+
+Put this in compose:
+
+```yaml
+deephaven:
+  environment:
+    DEEPHAVEN_AUTH_TYPE: psk
+    DEEPHAVEN_PSK: dev-psk
+    DH_PSK: dev-psk
+```
+
+Then do:
+
+```bash
+docker compose down
+docker compose up
+docker logs -f deephaven
+```
+
+You should now see the URL ending with:
+
+`?psk=dev-psk`
+
+---
+
+## One more important note
+
+Your `DEEPHAVEN_SERVER_ALLOWED_ORIGINS` includes `http://localhost:4200` — that’s fine for your Angular dev server. But once UI is containerized behind nginx, you may also need to allow `http://localhost:4200` (host-mapped) and/or `http://ui` etc. Not related to PSK, but useful.
+
+---
+
+If you paste your **deephaven Dockerfile** (or `entrypoint.sh`) from `deephaven-local:*`, I can point to the exact line that is generating the PSK and give you the exact change.
