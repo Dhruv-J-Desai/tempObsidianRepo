@@ -1,330 +1,202 @@
-def test_duplicate_email_on_update_returns_409():
-    # TODO 6 (CORE):
-    # - Create two employees
-    # - Attempt to update second employee's email to first one's email
-    # - Assert HTTP 409
-    pass
+Yes — **that’s actually better for interviews** 👍  
+Reading a file makes it feel **real**, tests fundamentals, and still stays simple.
 
-
-def test_soft_delete_hides_employee_from_active_list():
-    # TODO 7 (SENIOR):
-    # - Create employee
-    # - Soft delete it
-    # - Ensure it does not appear when is_active=true
-    pass
-
-
-Yep — based on your screenshots, you have **4 real TODOs** plus **2 tests** to add:
-
-✅ Search (`q`)  
-✅ Return pagination envelope (`items/total/limit/offset`)  
-✅ Email uniqueness on update  
-✅ Soft delete  
-✅ Repo supports filtering + search + total count  
-✅ Tests: 409 on duplicate email update, and soft delete hides from active list
-
-Below is a **complete, working solution** (drop-in code changes).
+Below is a **clean, interview-ready Spark coding exercise** that starts from **reading a file**, then performs transformations.
 
 ---
 
-# 1) Update schemas: add list response envelope
+# 🔥 Spark Interview Coding Question (File-based)
 
-### `app/schemas/employee.py` (add this at bottom)
+## Scenario
 
-```python
-from pydantic import BaseModel
-from typing import Generic, TypeVar
+You are given a **CSV file** containing transaction data stored in a data lake.
 
-T = TypeVar("T")
+### File: `transactions.csv`
 
-class PaginatedResponse(BaseModel, Generic[T]):
-    items: list[T]
-    total: int
-    limit: int
-    offset: int
-
-class EmployeeListResponse(PaginatedResponse["EmployeeOut"]):
-    pass
-```
-
-(If your editor complains about forward refs, you can also define `EmployeeListResponse` after `EmployeeOut` exactly like above.)
-
----
-
-# 2) Repository: implement `list(...)` with filtering + search + add `count(...)`
-
-### `app/repositories/employee_repo.py`
-
-Replace your `list(...)` with this:
-
-```python
-from sqlalchemy.orm import Session
-from sqlalchemy import select, func, or_
-from app.db.models import Employee
-
-class EmployeeRepo:
-    def __init__(self, db: Session):
-        self.db = db
-
-    def get(self, employee_id: int) -> Employee | None:
-        return self.db.get(Employee, employee_id)
-
-    def get_by_email_or_code(self, email: str, code: str) -> Employee | None:
-        stmt = select(Employee).where((Employee.email == email) | (Employee.employee_code == code))
-        return self.db.execute(stmt).scalar_one_or_none()
-
-    def get_by_email(self, email: str) -> Employee | None:
-        stmt = select(Employee).where(Employee.email == email)
-        return self.db.execute(stmt).scalar_one_or_none()
-
-    def list(self, *, limit: int, offset: int, is_active: bool | None, q: str | None) -> list[Employee]:
-        stmt = select(Employee)
-
-        if is_active is not None:
-            stmt = stmt.where(Employee.is_active == is_active)
-
-        if q:
-            pattern = f"%{q}%"
-            stmt = stmt.where(
-                or_(
-                    Employee.first_name.ilike(pattern),
-                    Employee.last_name.ilike(pattern),
-                    Employee.email.ilike(pattern),
-                )
-            )
-
-        stmt = stmt.offset(offset).limit(limit)
-        return list(self.db.execute(stmt).scalars().all())
-
-    def count(self, *, is_active: bool | None, q: str | None) -> int:
-        stmt = select(func.count()).select_from(Employee)
-
-        if is_active is not None:
-            stmt = stmt.where(Employee.is_active == is_active)
-
-        if q:
-            pattern = f"%{q}%"
-            stmt = stmt.where(
-                or_(
-                    Employee.first_name.ilike(pattern),
-                    Employee.last_name.ilike(pattern),
-                    Employee.email.ilike(pattern),
-                )
-            )
-
-        return int(self.db.execute(stmt).scalar_one())
-
-    def create(self, emp: Employee) -> Employee:
-        self.db.add(emp)
-        self.db.commit()
-        self.db.refresh(emp)
-        return emp
-
-    def save(self, emp: Employee) -> Employee:
-        self.db.commit()
-        self.db.refresh(emp)
-        return emp
-
-    def delete(self, emp: Employee) -> None:
-        self.db.delete(emp)
-        self.db.commit()
+```csv
+transaction_id,customer_id,country,amount,event_time
+t1,c1,US,120.5,2024-01-01T10:15:00
+t2,c2,IN,50.0,2024-01-01T10:20:00
+t3,,US,75.0,2024-01-01T11:00:00
+t4,c3,US,-10.0,2024-01-01T11:05:00
+t5,c4,FR,200.0,2024-01-02T09:00:00
+t6,c5,IN,300.0,2024-01-02T09:30:00
 ```
 
 ---
 
-# 3) Service: implement email uniqueness on update + soft delete + list returns (items,total)
+## Task
 
-### `app/services/employee_service.py`
+Write **PySpark code** to:
 
-Update these methods:
+### 1️⃣ Read the file
 
-```python
-from app.core.errors import NotFoundError, ConflictError
-from app.db.models import Employee
-from app.schemas.employee import EmployeeCreate, EmployeeUpdate
-from app.repositories.employee_repo import EmployeeRepo
+- Read the CSV file into a Spark DataFrame
+    
+- Infer schema
+    
+- Parse `event_time` as timestamp
+    
 
-class EmployeeService:
-    def __init__(self, repo: EmployeeRepo):
-        self.repo = repo
+### 2️⃣ Clean the data
 
-    def create_employee(self, payload: EmployeeCreate) -> Employee:
-        existing = self.repo.get_by_email_or_code(payload.email, payload.employee_code)
-        if existing:
-            raise ConflictError("Employee with same email or employee_code already exists")
-        emp = Employee(**payload.model_dump(), is_active=True)
-        return self.repo.create(emp)
+Remove rows where:
 
-    def get_employee(self, employee_id: int) -> Employee:
-        emp = self.repo.get(employee_id)
-        if not emp:
-            raise NotFoundError(f"Employee {employee_id} not found")
-        return emp
+- `amount` is null or `<= 0`
+    
+- `customer_id` is null
+    
 
-    def list_employees(self, *, limit: int, offset: int, is_active: bool | None, q: str | None):
-        items = self.repo.list(limit=limit, offset=offset, is_active=is_active, q=q)
-        total = self.repo.count(is_active=is_active, q=q)
-        return items, total
+### 3️⃣ Aggregate
 
-    def update_employee(self, employee_id: int, payload: EmployeeUpdate) -> Employee:
-        emp = self.get_employee(employee_id)
-        data = payload.model_dump(exclude_unset=True)
+- Compute **total transaction amount per country per day**
+    
 
-        # ✅ TODO: enforce uniqueness if email changes
-        if "email" in data and data["email"] is not None and data["email"] != emp.email:
-            existing = self.repo.get_by_email(data["email"])
-            if existing and existing.id != emp.id:
-                raise ConflictError("Employee with this email already exists")
+### 4️⃣ Rank
 
-        for k, v in data.items():
-            setattr(emp, k, v)
-
-        return self.repo.save(emp)
-
-    def delete_employee(self, employee_id: int) -> None:
-        emp = self.get_employee(employee_id)
-
-        # ✅ TODO: soft delete
-        emp.is_active = False
-        self.repo.save(emp)
-```
-
-Note: We no longer hard-delete. Great for interview signal.
+- For each day, return **top 2 countries** by total amount
+    
 
 ---
 
-# 4) API: implement q + return pagination envelope
+## Expected Output Schema
 
-### `app/api/employees.py`
-
-Update the list endpoint to return the envelope and pass `q` into service.
-
-```python
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from app.schemas.employee import EmployeeCreate, EmployeeUpdate, EmployeeOut, EmployeeListResponse
-from app.core.errors import NotFoundError, ConflictError
-from app.deps import get_employee_service
-from app.services.employee_service import EmployeeService
-
-router = APIRouter(prefix="/employees", tags=["employees"])
-
-@router.get("", response_model=EmployeeListResponse)
-def list_employees(
-    svc: EmployeeService = Depends(get_employee_service),
-    limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
-    is_active: bool | None = Query(None),
-    q: str | None = Query(None),
-):
-    items, total = svc.list_employees(limit=limit, offset=offset, is_active=is_active, q=q)
-    return {"items": items, "total": total, "limit": limit, "offset": offset}
-```
-
-✅ This fully addresses both TODOs in your screenshot.
-
----
-
-# 5) Tests: add the two TODO tests (with proper isolated DB)
-
-Your current tests likely use a persistent `employees.db`. For interviews, it’s better to isolate tests using an **in-memory sqlite DB** and override dependency injection.
-
-### `tests/test_employees.py` (replace the file with this)
-
-```python
-import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
-from app.main import app
-from app.db.base import Base
-from app.db.session import get_db
-
-@pytest.fixture()
-def client():
-    # In-memory SQLite for clean test runs
-    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
-    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-    Base.metadata.create_all(bind=engine)
-
-    def override_get_db():
-        db = TestingSessionLocal()
-        try:
-            yield db
-        finally:
-            db.close()
-
-    app.dependency_overrides[get_db] = override_get_db
-
-    with TestClient(app) as c:
-        yield c
-
-    app.dependency_overrides.clear()
-
-
-def create_emp(client: TestClient, code: str, email: str):
-    payload = {
-        "employee_code": code,
-        "first_name": "Ada",
-        "last_name": "Lovelace",
-        "email": email,
-        "department": "Engineering",
-        "title": "Staff",
-    }
-    r = client.post("/employees", json=payload)
-    assert r.status_code == 201
-    return r.json()
-
-
-def test_duplicate_email_on_update_returns_409(client: TestClient):
-    e1 = create_emp(client, "E-1001", "a1@example.com")
-    e2 = create_emp(client, "E-1002", "a2@example.com")
-
-    # Try to update e2 email to e1's email => 409
-    r = client.put(f"/employees/{e2['id']}", json={"email": e1["email"]})
-    assert r.status_code == 409
-
-
-def test_soft_delete_hides_employee_from_active_list(client: TestClient):
-    e1 = create_emp(client, "E-2001", "soft@example.com")
-
-    # Soft delete
-    r = client.delete(f"/employees/{e1['id']}")
-    assert r.status_code == 204
-
-    # List active employees should NOT include it
-    r = client.get("/employees", params={"is_active": True})
-    assert r.status_code == 200
-    data = r.json()
-    assert "items" in data
-    ids = [e["id"] for e in data["items"]]
-    assert e1["id"] not in ids
+```text
+date           : date
+country        : string
+total_amount  : double
+rank           : int
 ```
 
 ---
 
-# Quick check (what should work now)
+## Constraints
 
-- `GET /employees?q=ada` filters by first_name/last_name/email
+- ❌ No Pandas
     
-- `GET /employees` returns:
+- ❌ No Python UDFs
     
-    ```json
-    { "items": [...], "total": 123, "limit": 50, "offset": 0 }
-    ```
+- ✅ Use Spark SQL / DataFrame API
     
-- Updating email to an existing email returns **409**
-    
-- Delete sets `is_active=false`, doesn’t remove row
-    
-- Tests pass using isolated DB
+- Assume the file is **large**
     
 
 ---
 
-If you want, I can also add one more “senior signal” TODO + solution:
+# ✅ Model Solution (PySpark)
 
-- **transaction rollback** on exceptions (with `try/except` + `db.rollback()`), or
+```python
+from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+
+spark = SparkSession.builder.appName("spark-interview").getOrCreate()
+
+# 1️⃣ Read file
+df = (
+    spark.read
+    .option("header", True)
+    .option("inferSchema", True)
+    .csv("transactions.csv")
+)
+
+# 2️⃣ Clean data
+clean_df = (
+    df
+    .withColumn("event_time", F.to_timestamp("event_time"))
+    .filter(
+        (F.col("amount").isNotNull()) &
+        (F.col("amount") > 0) &
+        (F.col("customer_id").isNotNull())
+    )
+    .withColumn("date", F.to_date("event_time"))
+)
+
+# 3️⃣ Aggregate
+agg_df = (
+    clean_df
+    .groupBy("date", "country")
+    .agg(F.sum("amount").alias("total_amount"))
+)
+
+# 4️⃣ Rank
+window_spec = Window.partitionBy("date").orderBy(F.col("total_amount").desc())
+
+result = (
+    agg_df
+    .withColumn("rank", F.dense_rank().over(window_spec))
+    .filter(F.col("rank") <= 2)
+    .select("date", "country", "total_amount", "rank")
+)
+
+result.show()
+```
+
+---
+
+# 🎯 What This Tests (Interview Signal)
+
+|Skill|Tested|
+|---|---|
+|Spark I/O|`spark.read.csv`|
+|Schema handling|timestamp parsing|
+|Data cleaning|filters|
+|Aggregations|`groupBy`, `sum`|
+|Window functions|`dense_rank`|
+|Performance awareness|shuffle points|
+
+---
+
+# 💬 Follow-up Questions (Very Important)
+
+Ask **any 2**:
+
+1. Where do shuffles happen in this job?
     
-- a **structured error schema** (consistent error envelope).
+2. How would you optimize if `country` is highly skewed?
+    
+3. How would this change if the file was **Parquet** instead of CSV?
+    
+4. What changes if this data arrives as a **stream**?
+    
+
+---
+
+# 🧠 Senior Signal Answers (What to Listen For)
+
+- “CSV is row-based, Parquet is columnar”
+    
+- “GroupBy causes shuffle”
+    
+- “Window also causes shuffle”
+    
+- “Broadcast or AQE for skew”
+    
+- “Streaming would need watermark + checkpoint”
+    
+
+---
+
+# Variants You Can Swap In
+
+- Read **Parquet** instead of CSV
+    
+- Use **JSON** with nested fields
+    
+- Add **deduplication**
+    
+- Convert to **Delta Lake** write
+    
+
+If you want, I can:
+
+- Turn this into a **take-home Spark test**
+    
+- Add a **grading rubric (1–5)**
+    
+- Create a **streaming version**
+    
+- Align it specifically to **Databricks runtime**
+    
+
+Just tell me 👍
