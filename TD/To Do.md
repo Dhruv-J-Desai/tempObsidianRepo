@@ -1,196 +1,65 @@
-Here’s a **senior-level FastAPI CRUD scaffold** you can use in interviews. It’s **small enough to finish in 45–60 mins**, but structured enough to evaluate **architecture, DI, validation, error handling, and tests**.
+def test_duplicate_email_on_update_returns_409():
+    # TODO 6 (CORE):
+    # - Create two employees
+    # - Attempt to update second employee's email to first one's email
+    # - Assert HTTP 409
+    pass
 
-It uses **SQLite** by default (zero setup), but is designed so you can swap to Postgres easily.
 
----
+def test_soft_delete_hides_employee_from_active_list():
+    # TODO 7 (SENIOR):
+    # - Create employee
+    # - Soft delete it
+    # - Ensure it does not appear when is_active=true
+    pass
 
-## Project layout (what you hand the candidate)
 
-```text
-employee_api/
-├─ app/
-│  ├─ main.py
-│  ├─ deps.py
-│  ├─ core/
-│  │  ├─ config.py
-│  │  └─ errors.py
-│  ├─ db/
-│  │  ├─ base.py
-│  │  ├─ session.py
-│  │  └─ models.py
-│  ├─ schemas/
-│  │  └─ employee.py
-│  ├─ repositories/
-│  │  └─ employee_repo.py
-│  ├─ services/
-│  │  └─ employee_service.py
-│  └─ api/
-│     └─ employees.py
-├─ tests/
-│  └─ test_employees.py
-├─ pyproject.toml
-└─ README.md
-```
+Yep — based on your screenshots, you have **4 real TODOs** plus **2 tests** to add:
+
+✅ Search (`q`)  
+✅ Return pagination envelope (`items/total/limit/offset`)  
+✅ Email uniqueness on update  
+✅ Soft delete  
+✅ Repo supports filtering + search + total count  
+✅ Tests: 409 on duplicate email update, and soft delete hides from active list
+
+Below is a **complete, working solution** (drop-in code changes).
 
 ---
 
-## `pyproject.toml` (minimal, interview-friendly)
+# 1) Update schemas: add list response envelope
 
-```toml
-[project]
-name = "employee-api"
-version = "0.1.0"
-requires-python = ">=3.11"
-dependencies = [
-  "fastapi>=0.110",
-  "uvicorn[standard]>=0.27",
-  "pydantic>=2.6",
-  "pydantic-settings>=2.2",
-  "sqlalchemy>=2.0",
-]
-
-[project.optional-dependencies]
-dev = ["pytest>=8.0", "httpx>=0.27", "ruff>=0.3"]
-
-[tool.ruff]
-line-length = 100
-```
-
----
-
-## `app/core/config.py`
+### `app/schemas/employee.py` (add this at bottom)
 
 ```python
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import BaseModel
+from typing import Generic, TypeVar
 
-class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-    app_name: str = "Employee API"
-    database_url: str = "sqlite:///./employees.db"  # swap for Postgres in real use
+T = TypeVar("T")
 
-settings = Settings()
-```
+class PaginatedResponse(BaseModel, Generic[T]):
+    items: list[T]
+    total: int
+    limit: int
+    offset: int
 
----
-
-## `app/db/base.py`
-
-```python
-from sqlalchemy.orm import DeclarativeBase
-
-class Base(DeclarativeBase):
+class EmployeeListResponse(PaginatedResponse["EmployeeOut"]):
     pass
 ```
 
----
-
-## `app/db/session.py`
-
-```python
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from app.core.config import settings
-
-connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
-engine = create_engine(settings.database_url, pool_pre_ping=True, connect_args=connect_args)
-
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-```
+(If your editor complains about forward refs, you can also define `EmployeeListResponse` after `EmployeeOut` exactly like above.)
 
 ---
 
-## `app/db/models.py`
+# 2) Repository: implement `list(...)` with filtering + search + add `count(...)`
 
-```python
-from datetime import datetime
-from sqlalchemy import String, Boolean, DateTime, func
-from sqlalchemy.orm import Mapped, mapped_column
-from app.db.base import Base
+### `app/repositories/employee_repo.py`
 
-class Employee(Base):
-    __tablename__ = "employees"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    employee_code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
-    first_name: Mapped[str] = mapped_column(String(100))
-    last_name: Mapped[str] = mapped_column(String(100))
-    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    department: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    title: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        onupdate=func.now(),
-    )
-```
-
----
-
-## `app/schemas/employee.py`
-
-```python
-from pydantic import BaseModel, EmailStr, Field
-from typing import Optional
-
-class EmployeeCreate(BaseModel):
-    employee_code: str = Field(min_length=2, max_length=32)
-    first_name: str = Field(min_length=1, max_length=100)
-    last_name: str = Field(min_length=1, max_length=100)
-    email: EmailStr
-    department: Optional[str] = Field(default=None, max_length=100)
-    title: Optional[str] = Field(default=None, max_length=100)
-
-class EmployeeUpdate(BaseModel):
-    first_name: Optional[str] = Field(default=None, min_length=1, max_length=100)
-    last_name: Optional[str] = Field(default=None, min_length=1, max_length=100)
-    email: Optional[EmailStr] = None
-    department: Optional[str] = Field(default=None, max_length=100)
-    title: Optional[str] = Field(default=None, max_length=100)
-    is_active: Optional[bool] = None
-
-class EmployeeOut(BaseModel):
-    id: int
-    employee_code: str
-    first_name: str
-    last_name: str
-    email: EmailStr
-    department: Optional[str] = None
-    title: Optional[str] = None
-    is_active: bool
-
-    class Config:
-        from_attributes = True
-```
-
----
-
-## `app/core/errors.py` (domain errors)
-
-```python
-class NotFoundError(Exception):
-    pass
-
-class ConflictError(Exception):
-    pass
-```
-
----
-
-## `app/repositories/employee_repo.py` (DB access)
+Replace your `list(...)` with this:
 
 ```python
 from sqlalchemy.orm import Session
-from sqlalchemy import select
+from sqlalchemy import select, func, or_
 from app.db.models import Employee
 
 class EmployeeRepo:
@@ -204,11 +73,46 @@ class EmployeeRepo:
         stmt = select(Employee).where((Employee.email == email) | (Employee.employee_code == code))
         return self.db.execute(stmt).scalar_one_or_none()
 
-    def list(self, limit: int, offset: int, is_active: bool | None) -> list[Employee]:
-        stmt = select(Employee).offset(offset).limit(limit)
+    def get_by_email(self, email: str) -> Employee | None:
+        stmt = select(Employee).where(Employee.email == email)
+        return self.db.execute(stmt).scalar_one_or_none()
+
+    def list(self, *, limit: int, offset: int, is_active: bool | None, q: str | None) -> list[Employee]:
+        stmt = select(Employee)
+
         if is_active is not None:
             stmt = stmt.where(Employee.is_active == is_active)
+
+        if q:
+            pattern = f"%{q}%"
+            stmt = stmt.where(
+                or_(
+                    Employee.first_name.ilike(pattern),
+                    Employee.last_name.ilike(pattern),
+                    Employee.email.ilike(pattern),
+                )
+            )
+
+        stmt = stmt.offset(offset).limit(limit)
         return list(self.db.execute(stmt).scalars().all())
+
+    def count(self, *, is_active: bool | None, q: str | None) -> int:
+        stmt = select(func.count()).select_from(Employee)
+
+        if is_active is not None:
+            stmt = stmt.where(Employee.is_active == is_active)
+
+        if q:
+            pattern = f"%{q}%"
+            stmt = stmt.where(
+                or_(
+                    Employee.first_name.ilike(pattern),
+                    Employee.last_name.ilike(pattern),
+                    Employee.email.ilike(pattern),
+                )
+            )
+
+        return int(self.db.execute(stmt).scalar_one())
 
     def create(self, emp: Employee) -> Employee:
         self.db.add(emp)
@@ -228,7 +132,11 @@ class EmployeeRepo:
 
 ---
 
-## `app/services/employee_service.py` (business rules)
+# 3) Service: implement email uniqueness on update + soft delete + list returns (items,total)
+
+### `app/services/employee_service.py`
+
+Update these methods:
 
 ```python
 from app.core.errors import NotFoundError, ConflictError
@@ -253,212 +161,170 @@ class EmployeeService:
             raise NotFoundError(f"Employee {employee_id} not found")
         return emp
 
-    def list_employees(self, limit: int, offset: int, is_active: bool | None) -> list[Employee]:
-        return self.repo.list(limit=limit, offset=offset, is_active=is_active)
+    def list_employees(self, *, limit: int, offset: int, is_active: bool | None, q: str | None):
+        items = self.repo.list(limit=limit, offset=offset, is_active=is_active, q=q)
+        total = self.repo.count(is_active=is_active, q=q)
+        return items, total
 
     def update_employee(self, employee_id: int, payload: EmployeeUpdate) -> Employee:
         emp = self.get_employee(employee_id)
         data = payload.model_dump(exclude_unset=True)
 
-        # TODO (senior): if email changes, enforce uniqueness check
+        # ✅ TODO: enforce uniqueness if email changes
+        if "email" in data and data["email"] is not None and data["email"] != emp.email:
+            existing = self.repo.get_by_email(data["email"])
+            if existing and existing.id != emp.id:
+                raise ConflictError("Employee with this email already exists")
+
         for k, v in data.items():
             setattr(emp, k, v)
+
         return self.repo.save(emp)
 
     def delete_employee(self, employee_id: int) -> None:
         emp = self.get_employee(employee_id)
-        self.repo.delete(emp)
+
+        # ✅ TODO: soft delete
+        emp.is_active = False
+        self.repo.save(emp)
 ```
+
+Note: We no longer hard-delete. Great for interview signal.
 
 ---
 
-## `app/deps.py` (dependency injection)
+# 4) API: implement q + return pagination envelope
 
-```python
-from sqlalchemy.orm import Session
-from fastapi import Depends
-from app.db.session import get_db
-from app.repositories.employee_repo import EmployeeRepo
-from app.services.employee_service import EmployeeService
+### `app/api/employees.py`
 
-def get_employee_service(db: Session = Depends(get_db)) -> EmployeeService:
-    return EmployeeService(EmployeeRepo(db))
-```
-
----
-
-## `app/api/employees.py` (router)
+Update the list endpoint to return the envelope and pass `q` into service.
 
 ```python
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from app.schemas.employee import EmployeeCreate, EmployeeUpdate, EmployeeOut
+from app.schemas.employee import EmployeeCreate, EmployeeUpdate, EmployeeOut, EmployeeListResponse
 from app.core.errors import NotFoundError, ConflictError
 from app.deps import get_employee_service
 from app.services.employee_service import EmployeeService
 
 router = APIRouter(prefix="/employees", tags=["employees"])
 
-@router.post("", response_model=EmployeeOut, status_code=status.HTTP_201_CREATED)
-def create_employee(payload: EmployeeCreate, svc: EmployeeService = Depends(get_employee_service)):
-    try:
-        return svc.create_employee(payload)
-    except ConflictError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-
-@router.get("/{employee_id}", response_model=EmployeeOut)
-def get_employee(employee_id: int, svc: EmployeeService = Depends(get_employee_service)):
-    try:
-        return svc.get_employee(employee_id)
-    except NotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-
-@router.get("", response_model=list[EmployeeOut])
+@router.get("", response_model=EmployeeListResponse)
 def list_employees(
     svc: EmployeeService = Depends(get_employee_service),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     is_active: bool | None = Query(None),
+    q: str | None = Query(None),
 ):
-    return svc.list_employees(limit=limit, offset=offset, is_active=is_active)
-
-@router.put("/{employee_id}", response_model=EmployeeOut)
-def update_employee(employee_id: int, payload: EmployeeUpdate, svc: EmployeeService = Depends(get_employee_service)):
-    try:
-        return svc.update_employee(employee_id, payload)
-    except NotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except ConflictError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-
-@router.delete("/{employee_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_employee(employee_id: int, svc: EmployeeService = Depends(get_employee_service)):
-    try:
-        svc.delete_employee(employee_id)
-    except NotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    items, total = svc.list_employees(limit=limit, offset=offset, is_active=is_active, q=q)
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
 ```
+
+✅ This fully addresses both TODOs in your screenshot.
 
 ---
 
-## `app/main.py` (startup + health + router)
+# 5) Tests: add the two TODO tests (with proper isolated DB)
+
+Your current tests likely use a persistent `employees.db`. For interviews, it’s better to isolate tests using an **in-memory sqlite DB** and override dependency injection.
+
+### `tests/test_employees.py` (replace the file with this)
 
 ```python
-from fastapi import FastAPI
-from app.core.config import settings
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from app.main import app
 from app.db.base import Base
-from app.db.session import engine
-from app.api.employees import router as employees_router
+from app.db.session import get_db
 
-app = FastAPI(title=settings.app_name)
+@pytest.fixture()
+def client():
+    # In-memory SQLite for clean test runs
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-@app.on_event("startup")
-def on_startup():
-    # Interview-friendly: auto-create tables (in real prod, use Alembic)
     Base.metadata.create_all(bind=engine)
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+    def override_get_db():
+        db = TestingSessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
 
-app.include_router(employees_router)
-```
+    app.dependency_overrides[get_db] = override_get_db
 
----
+    with TestClient(app) as c:
+        yield c
 
-## `tests/test_employees.py` (minimal test, shows senior habits)
+    app.dependency_overrides.clear()
 
-```python
-from fastapi.testclient import TestClient
-from app.main import app
 
-client = TestClient(app)
-
-def test_employee_crud_happy_path():
+def create_emp(client: TestClient, code: str, email: str):
     payload = {
-        "employee_code": "E-1001",
+        "employee_code": code,
         "first_name": "Ada",
         "last_name": "Lovelace",
-        "email": "ada@example.com",
+        "email": email,
         "department": "Engineering",
         "title": "Staff",
     }
-
     r = client.post("/employees", json=payload)
     assert r.status_code == 201
-    emp = r.json()
-    emp_id = emp["id"]
+    return r.json()
 
-    r = client.get(f"/employees/{emp_id}")
-    assert r.status_code == 200
 
-    r = client.put(f"/employees/{emp_id}", json={"title": "Principal"})
-    assert r.status_code == 200
-    assert r.json()["title"] == "Principal"
+def test_duplicate_email_on_update_returns_409(client: TestClient):
+    e1 = create_emp(client, "E-1001", "a1@example.com")
+    e2 = create_emp(client, "E-1002", "a2@example.com")
 
-    r = client.delete(f"/employees/{emp_id}")
+    # Try to update e2 email to e1's email => 409
+    r = client.put(f"/employees/{e2['id']}", json={"email": e1["email"]})
+    assert r.status_code == 409
+
+
+def test_soft_delete_hides_employee_from_active_list(client: TestClient):
+    e1 = create_emp(client, "E-2001", "soft@example.com")
+
+    # Soft delete
+    r = client.delete(f"/employees/{e1['id']}")
     assert r.status_code == 204
+
+    # List active employees should NOT include it
+    r = client.get("/employees", params={"is_active": True})
+    assert r.status_code == 200
+    data = r.json()
+    assert "items" in data
+    ids = [e["id"] for e in data["items"]]
+    assert e1["id"] not in ids
 ```
 
 ---
 
-## `README.md` (candidate instructions)
+# Quick check (what should work now)
 
-```md
-### Run
-pip install -e ".[dev]"
-uvicorn app.main:app --reload --port 8000
-
-### Test
-pytest -q
-
-### Endpoints
-GET  /health
-POST /employees
-GET  /employees
-GET  /employees/{id}
-PUT  /employees/{id}
-DELETE /employees/{id}
-```
-
----
-
-# Interview TODO list (what you ask them to implement)
-
-Pick 2–3 items depending on time:
-
-### Core (must-have)
-
--  Add **unique email check on update** (return 409)
+- `GET /employees?q=ada` filters by first_name/last_name/email
     
--  Add **search**: `?q=` matches first_name/last_name/email
+- `GET /employees` returns:
     
--  Add **soft delete** instead of hard delete (set `is_active=false`)
+    ```json
+    { "items": [...], "total": 123, "limit": 50, "offset": 0 }
+    ```
     
-
-### Senior signals
-
--  Add **pagination metadata** `{items, limit, offset, total}`
+- Updating email to an existing email returns **409**
     
--  Add **structured error responses** (consistent error schema)
+- Delete sets `is_active=false`, doesn’t remove row
     
--  Add **transaction handling** / rollback for failures
-    
--  Add **pytest** tests for conflict + not found paths
-    
-
-### Optional extensions
-
--  Add auth stub (e.g., `X-API-Key` header)
-    
--  Add OpenAPI examples / response docs
+- Tests pass using isolated DB
     
 
 ---
 
-If you want, I can also give you:
+If you want, I can also add one more “senior signal” TODO + solution:
 
-- a **grading rubric (1–5)** for this exact exercise
+- **transaction rollback** on exceptions (with `try/except` + `db.rollback()`), or
     
-- a **“broken version”** of the scaffold for debugging interviews
-    
-- a Postgres version using Alembic migrations
+- a **structured error schema** (consistent error envelope).
