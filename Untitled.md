@@ -1,178 +1,120 @@
-Perfect — this screenshot is **exactly what we needed** 👍  
-Good news first, then the final fix.
+Nice — with AKS access you can debug this properly. Here’s a **straightforward checklist** that will take you from “502” → “exact root cause” quickly.
 
----
+## 0) Make sure you’re on the right cluster/context
 
-## ✅ What’s confirmed now
-
-From your output:
-
-```text
-kubelogin version v0.2.14
-Platform: windows/amd64
+```bash
+kubectl config current-context
+kubectl cluster-info
 ```
 
-👉 **kubelogin IS installed and working**  
-👉 It **is in PATH**  
-👉 Version is **new enough**  
-So we can rule out installation issues completely.
+## 1) Confirm the VirtualServer state + why it’s invalid
 
-That means we’re now down to **pure Azure AD token / scope / cache behavior**.
+(Use the namespace Ramesh used — looks like `tdvip-tdvip-pbg` / `tdvip-tdvip-bbg` depending on env.)
 
----
-
-## 🔴 What’s still broken (the real issue)
-
-Your kubeconfig uses:
-
-```yaml
-kubelogin --login azurecli --server-id 6dae42f8-4368-4678-94ff-3960e28e3630
+```bash
+kubectl -n tdvip-tdvip-pbg get virtualserver
+kubectl -n tdvip-tdvip-pbg describe virtualserver vs-pde-vpda-services
 ```
 
-That tells kubelogin:
+✅ The **Events** section at the bottom is the goldmine. It will say things like:
 
-> “Ask Azure CLI for a token for this AKS Server App ID”
-
-Azure AD replies:
-
-> ❌ **AADSTS50076 – MFA / Conditional Access required**
-
-And Azure CLI **does NOT automatically re-prompt** unless you log in **with that scope explicitly**.
-
----
-
-## ✅ The exact fix (do this step-by-step, no skipping)
-
-### 1️⃣ Logout completely (important)
-
-This clears any half-cached tokens.
-
-```powershell
-az logout
-```
-
-Close **PowerShell**, reopen it.
-
----
-
-### 2️⃣ Login with the AKS server scope (this is the key)
-
-Use **exactly** this command:
-
-```powershell
-az login --scope 6dae42f8-4368-4678-94ff-3960e28e3630/.default
-```
-
-✔ Browser will open  
-✔ MFA will trigger  
-✔ Token will be cached **for AKS**, not just ARM
-
----
-
-### 3️⃣ Verify account context (quick check)
-
-```powershell
-az account show
-```
-
-Confirm:
-
-- Tenant = TD tenant
+- service not found
     
-- User = `robin.bajaj@dev-td.com`
+- port not defined on service
     
-- Subscription = correct one
+- invalid route
+    
+- TLS secret missing
+    
+- upstream has no endpoints
     
 
----
+## 2) Verify the host matches the domain you’re testing
 
-### 4️⃣ Re-wire kubeconfig cleanly
-
-Even though it exists, we refresh it to avoid stale exec blocks.
-
-```powershell
-az aks get-credentials `
-  --resource-group <rg-name> `
-  --name <aks-name> `
-  --overwrite-existing
+```bash
+kubectl -n tdvip-tdvip-pbg get virtualserver vs-pde-vpda-services -o yaml | egrep -n "host:|name:|tls:|secret:"
 ```
 
-Then:
+Make sure `spec.host` is exactly the new DNS (example: `pde.tdvip.dev.azure.td.com`).
 
-```powershell
-kubelogin convert-kubeconfig -l azurecli
+## 3) Check upstream service + endpoints (most common 502 cause)
+
+From your earlier screenshot, this was likely the issue (port mismatch / no endpoints).
+
+```bash
+kubectl -n tdvip-tdvip-pbg get svc config-service -o yaml | egrep -n "name:|port:|targetPort:"
+kubectl -n tdvip-tdvip-pbg get endpoints config-service -o wide
+kubectl -n tdvip-tdvip-pbg get pods -l app=config-service -o wide
 ```
 
----
+What you’re looking for:
 
-### 5️⃣ Test (this should now work)
-
-```powershell
-kubectl get ns
-```
-
-or your original:
-
-```powershell
-kubectl get endpoints config-service
-```
-
----
-
-## 🧠 Why this happens (so it makes sense)
-
-Azure has **two different auth worlds**:
-
-|Login type|Used for|
-|---|---|
-|`az login` (default)|ARM, Portal, Resource Mgmt|
-|`az login --scope <AKS app>`|**AKS AAD server auth**|
-
-Your org’s **Conditional Access + MFA** blocks silent token reuse for AKS, so kubelogin _must_ see a token minted with that **server app scope**.
-
-Ramesh likely:
-
-- Logged in recently
+- **Endpoints list is empty** → service selector/pods not ready → 502
     
-- Or used device code
-    
-- Or already had a scoped token cached
+- **Endpoints show port 8560 but VirtualServer upstream uses 8080** → 502
     
 
-That’s why his worked and yours didn’t.
+## 4) Check NGINX Ingress Controller logs for the exact rejection
 
----
+First find the ingress controller namespace/pods (often `ingress-nginx` or similar):
 
-## 🚑 If it STILL fails (rare but real)
-
-Switch to **device code login** (most stable behind corp MFA):
-
-```powershell
-kubelogin convert-kubeconfig -l devicecode
-kubectl get ns
+```bash
+kubectl get ns | egrep -i "ingress|nginx"
+kubectl -n ingress-nginx get pods
+kubectl -n ingress-nginx logs deploy/ingress-nginx-controller --tail=200
 ```
 
-This bypasses Azure CLI token reuse entirely.
+(If the deploy name differs, use the pod name.)  
+These logs will often say exactly why a VS is “Invalid”.
+
+## 5) Validate related resources (TLS + policies)
+
+### TLS secret exists?
+
+```bash
+kubectl -n tdvip-tdvip-pbg get secret | grep -i pde-vpda-services-pathbased-vs
+```
+
+### NGINX policies exist?
+
+```bash
+kubectl -n tdvip-tdvip-pbg get nginxpolicy
+```
+
+## 6) Quick “does it work” test from inside the cluster
+
+This helps separate “NGINX routing” vs “backend broken”.
+
+```bash
+kubectl -n tdvip-tdvip-pbg run curltest --rm -it --image=curlimages/curl -- \
+  curl -sv http://config-service:8560/health
+```
+
+(Adjust port/path to what your service actually serves.)
 
 ---
 
-## TL;DR (one-liner)
+# Fastest path to root cause
 
-> **kubelogin is fine — Azure CLI just needs an AKS-scoped MFA login**
+If you do only **two commands**, do these and paste output back (you can redact IDs):  
+1)
 
-```powershell
-az logout
-az login --scope 6dae42f8-4368-4678-94ff-3960e28e3630/.default
-kubectl get ns
+```bash
+kubectl -n tdvip-tdvip-pbg describe virtualserver vs-pde-vpda-services
 ```
 
-If you want, next I can:
+```bash
+kubectl -n tdvip-tdvip-pbg get endpoints config-service -o wide
+```
 
-- Explain **why that server-id exists**
-    
-- Or show **how to avoid this permanently** (SPN / workload identity)
-    
-- Or help you explain this cleanly to the platform team
-    
+With those two, I can tell you exactly whether it’s:
 
-Just tell me 👍
+- port mismatch
+    
+- no endpoints
+    
+- host mismatch
+    
+- TLS secret/policy issue
+    
+- invalid route config
