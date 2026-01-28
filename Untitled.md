@@ -13,3 +13,5 @@ logger.error("DATADOG_TEST: error log from job cluster")
 time.sleep(30)
 
 print("DATADOG_TEST: notebook finished")
+
+sfvm sfmnvbsd
