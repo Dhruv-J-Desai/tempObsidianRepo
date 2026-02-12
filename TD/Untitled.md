@@ -1,106 +1,93 @@
-Nice — this screenshot confirms **CSS is loading correctly** ✅
+Perfect — this output is **exactly what we wanted** ✅
 
-- `curl -I http://localhost:8080/styles-OLAOSOVV.css` → **HTTP/1.1 200 OK**
+It proves:
+
+- Your built CSS **does contain** the `@font-face` rules
     
-- `Content-Type: text/css`
-    
-- And the body you printed is real CSS (not `index.html`)
+- And they reference the fonts with the **correct URL**:
     
 
-So the “messed up” UI is **not** because nginx is serving HTML for CSS/JS.
+`src: url(/assets/fonts/<file>.woff2) format("woff2");`
 
-That leaves 2 common causes:
+So **the CSS path is correct**. Now the only question is: **is the browser actually downloading those `.woff2` files and using them?**
 
----
+## Next 3 checks (in order)
 
-## A) The font files are served, but the browser is **blocking** them (CORS / MIME / caching)
+### 1) Verify the font file is actually reachable + looks like a real woff2
 
-Even though `curl -I` shows `Content-Type: font/woff2`, browsers can still block if headers are missing.
-
-Check headers for a font URL:
+Run:
 
 ```bash
 docker exec -it thales-edge sh -lc "curl -I http://localhost:8080/assets/fonts/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2"
+docker exec -it thales-edge sh -lc "curl -s --range 0-15 http://localhost:8080/assets/fonts/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2 | xxd"
 ```
 
-If you **don’t** see `Access-Control-Allow-Origin`, add this to nginx:
+Expected:
 
-```nginx
-location ~* \.(woff2?|ttf|eot|otf)$ {
-  add_header Access-Control-Allow-Origin "*" always;
-  add_header Cache-Control "public, max-age=31536000, immutable";
-  try_files $uri =404;
-  access_log off;
-}
-```
+- `HTTP/1.1 200 OK`
+    
+- `Content-Type: font/woff2`
+    
+- The hex output should start with something like **`77 4f 46 32`** (that’s “wOF2”).
+    
 
-(Fonts and CSS are same origin here, but some setups still hit CORS edge cases—this removes doubt.)
+If instead it starts with `<html` or something, nginx is serving the wrong thing.
 
 ---
 
-## B) Your `@font-face` `src:` URLs in CSS don’t match the built output
+### 2) Check in the browser (this is the real decider)
 
-In Angular builds, the CSS often gets rewritten and sometimes paths change depending on `<base href>` and deploy URL.
+Open DevTools → **Network** → filter `woff2` → refresh page.
 
-### 1) Confirm the CSS references the exact same path you’re curling:
+You should see those exact font files:
 
-```bash
-docker exec -it thales-edge sh -lc "grep -R \"assets/fonts\" -n /opt/app-root/src/styles-*.css | head -n 20"
-```
-
-You want to see:  
-`url(/assets/fonts/<file>.woff2)` ✅
-
-If it shows something like:
-
-- `url(assets/fonts/...)` (missing leading slash)
+- status **200**
     
-- `url(/opt/app-root/src/assets/fonts/...)` (wrong)
+- size **non-zero**
     
-- `url(./assets/fonts/...)` (can break depending on base href)
+- **Type: font**
     
 
-**Best practice for SPA behind nginx root**:
+If you see:
 
-```css
-src: url("/assets/fonts/xxxx.woff2") format("woff2");
-```
-
----
-
-## Quick browser-side proof (fastest check)
-
-Open DevTools → **Network** tab → filter `woff2`:
-
-- If you see **404** → path mismatch (fix CSS path)
+- **404** → nginx root/path mismatch
     
-- If you see **200** but **(blocked)** or **CORS** → add nginx headers
+- **(blocked)** / **CORS** → add nginx header (below)
     
-- If you see fonts load but still “messed up” → it’s **not fonts**, it’s layout CSS (likely Angular Material theme vars, or missing global styles)
+- **200** but “from disk cache” and still old → hard reload / disable cache
+    
+
+Hard reload:
+
+- Chrome DevTools open → right click refresh → **Empty cache and hard reload**
     
 
 ---
 
-## One more thing: the “messed up” screenshot looks like “Material styles not applied”
+### 3) If fonts load but UI still “messed up”
 
-That happens when **theme variables** aren’t taking effect or the material CSS isn’t included the way you think.
+Then it’s **not fonts**. That table/layout issue usually means **Material theme CSS / global styles** aren’t applying the way you think.
 
-Confirm Material variables exist in the loaded CSS:
+Quick check:
 
 ```bash
 docker exec -it thales-edge sh -lc "grep -R \"--mat-sys\" -n /opt/app-root/src/styles-*.css | head"
 ```
 
-If this returns nothing, your theme build/config isn’t being included.
+If that prints nothing, your Material theme variables aren’t in the shipped CSS.
 
 ---
 
-### Send me just 2 outputs and I’ll tell you exactly which branch it is:
+## If DevTools shows CORS blocking fonts (add this nginx block)
 
-```bash
-docker exec -it thales-edge sh -lc "curl -I http://localhost:8080/assets/fonts/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2"
+```nginx
+location ~* \.(woff2?|ttf|otf|eot)$ {
+  add_header Access-Control-Allow-Origin "*" always;
+  add_header Cache-Control "public, max-age=31536000, immutable";
+  try_files $uri =404;
+}
 ```
 
-```bash
-docker exec -it thales-edge sh -lc "grep -R \"assets/fonts\" -n /opt/app-root/src/styles-*.css | head -n 10"
-```
+---
+
+If you paste the output of the **two curl commands** in step (1), I’ll tell you immediately whether nginx is serving the correct binary font (and what to fix if not).
