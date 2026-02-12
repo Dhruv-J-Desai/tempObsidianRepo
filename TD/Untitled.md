@@ -1,259 +1,96 @@
-Perfect. This screenshot answers everything very clearly.
+Yep — in a locked-down TD network, **Google Fonts is often blocked**, so those `<link href="https://fonts.googleapis.com/...">` will fail. You have a few solid workarounds.
 
-Let’s break it down.
+## Option 1 (best): Bundle the font files with your app (no internet needed)
 
----
-
-# 🔍 What Your Init Script Is Actually Configuring
-
-Inside the script, it writes this file:
-
-```
-/etc/datadog-agent/conf.d/spark.d/spark.yaml
-```
-
-And the log collection config is:
-
-```yaml
-logs:
-  - type: file
-    path: /databricks/driver/logs/*.log
-    source: spark
-    service: databricks
-
-  - type: file
-    path: /databricks/driver/logs/std*
-    source: spark
-    service: databricks
-```
-
----
-
-# 🚨 This Is The Key
-
-There is **NO reference to `/app_logs` anywhere in this config.**
-
-That means:
-
-Datadog is only tailing:
-
-```
-/databricks/driver/logs/
-```
-
-NOT:
-
-```
-/app_logs/
-```
-
----
-
-# 🧠 So Why Did `/app_logs` Work Earlier?
-
-Two possibilities:
-
-### 1️⃣ You tested on a different cluster
-
-Maybe that cluster had a different init script.
-
-OR
-
-### 2️⃣ Someone manually configured app_logs in another conf file
-
-You can verify with:
-
-```python
-%sh ls -R /etc/datadog-agent/conf.d
-```
-
-Look for anything referencing app_logs.
-
----
-
-# 🎯 What This Means For You
-
-Right now, in THIS configuration:
-
-If you want logs to appear in Datadog, you must write to:
-
-```
-/databricks/driver/logs/
-```
-
-Because that is what the agent is tailing.
-
----
-
-# 🔬 Why log4j Worked
-
-Log4j writes to Spark driver logs.
-
-Spark driver logs live in:
-
-```
-/databricks/driver/logs/
-```
-
-Which is exactly what your agent is configured to read.
-
-That’s why log4j logs appeared.
-
----
-
-# 🔬 Why Python logging Didn't Appear
-
-Python logging by default:
-
-- Writes to stdout
+1. **Download the font files** once (outside TD network, or from an internal-approved source) as `.woff2` (preferred).
     
-- Or writes nowhere unless configured
+2. Put them in your UI project, e.g.
     
 
-If it didn’t write to:
-
 ```
-/databricks/driver/logs/
-```
-
-Datadog would never see it.
-
----
-
-# 🔥 Correct Way For Your Environment
-
-You have two clean options.
-
----
-
-## ✅ Option A (Recommended for TDVIP consistency)
-
-Write logs to:
-
-```
-/databricks/driver/logs/app.log
+src/assets/fonts/Roboto/
+  Roboto-Regular.woff2
+  Roboto-Medium.woff2
 ```
 
-Example:
-
-```python
-import logging
-import os
-
-LOG_PATH = "/databricks/driver/logs/app.log"
-
-os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
-
-handler = logging.FileHandler(LOG_PATH)
-formatter = logging.Formatter(
-    "%(asctime)s %(levelname)s %(name)s %(message)s"
-)
-handler.setFormatter(formatter)
-
-logger = logging.getLogger("tdvip-app")
-logger.setLevel(logging.INFO)
-logger.handlers = [handler]
-logger.propagate = False
-
-logger.info("TDVIP structured log test")
-```
-
-That will 100% appear in Datadog under:
-
-```
-service: databricks
-source: spark
-```
-
-Because that is how your agent is configured.
-
----
-
-## ✅ Option B (Cleaner Enterprise Pattern)
-
-Modify the init script to add:
-
-```yaml
-- type: file
-  path: /databricks/driver/app_logs/*.log
-  service: tdvip-app
-  source: tdvip
-```
-
-Then restart agent.
-
-This allows proper separation of:
-
-- Spark logs
-    
-- App logs
+3. Add `@font-face` in a CSS file (e.g. `src/styles.css` or `src/assets/fonts/fonts.css`):
     
 
-This is actually what Eilam likely meant by:
+```css
+@font-face {
+  font-family: "Roboto";
+  src: url("/assets/fonts/Roboto/Roboto-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
 
-> “Formalize logging via app_logs”
-
----
-
-# 🧠 Why Everything Makes Sense Now
-
-Earlier confusion:
-
-|What you did|Why it behaved that way|
-|---|---|
-|print()|Notebook UI layer|
-|logging default|stdout only|
-|log4j|Writes to Spark driver logs|
-|/app_logs|Only works if agent is tailing it|
-|/databricks/driver/logs|Always works in this config|
-
-Now you can see the entire system clearly.
-
----
-
-# 🏗 Your Actual Logging Architecture (From Screenshot)
-
-```
-Python / Spark
-    ↓
-Writes to /databricks/driver/logs/
-    ↓
-Datadog Agent (spark.d/spark.yaml)
-    ↓
-Datadog
+@font-face {
+  font-family: "Roboto";
+  src: url("/assets/fonts/Roboto/Roboto-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
 ```
 
-No mystery anymore.
-
----
-
-# 🎯 Final Answer To Your Question
-
-> Is this where I need to look for the app_log path?
-
-Yes.
-
-And the answer is:
-
-There is currently no app_logs path configured.
-
-Only:
-
-```
-/databricks/driver/logs/
-```
-
-is being collected.
-
----
-
-If you want, next I can:
-
-- Show you how to modify this script properly (production-safe)
-    
-- Design a TDVIP standardized app logging config
-    
-- Or explain how to version-control this safely via Terraform
+4. Use it normally:
     
 
-You’re now operating at infrastructure level — which is exactly where you should be.
+```css
+body { font-family: "Roboto", Arial, sans-serif; }
+```
+
+✅ Works everywhere, no external calls.
+
+> Note: Make sure your org is okay with including the font license files in the repo (Google fonts are usually OFL/Apache, but still follow internal policy).
+
+---
+
+## Option 2: Use system fonts only (fastest, zero packaging)
+
+If you don’t care about exact Roboto look:
+
+```css
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", Arial, sans-serif;
+}
+```
+
+✅ No network, no extra files, always works.
+
+---
+
+## Option 3: Host fonts internally (if TD has an internal artifact/static host)
+
+If you have an internal Nginx/static server or artifact repo:
+
+- Upload `.woff2` there
+    
+- Point `<link>` or `@font-face` to the internal URL
+    
+
+✅ Centralized, no per-app duplication  
+❗ Needs an approved internal hosting place
+
+---
+
+## Option 4: Package fonts into your Docker image (good for your “share image” goal)
+
+If your UI is served by nginx in a container:
+
+- Copy `assets/fonts` into the image at build time
+    
+- Reference `/assets/fonts/...` in CSS
+    
+
+✅ Teammates don’t need internet, just run the image
+
+---
+
+### Quick recommendation for your setup
+
+Since you’re already containerizing (`thales-edge` / nginx):  
+**Bundle fonts into the UI repo + serve them from your own nginx** (Option 1 + 4). That matches your “no external dependencies” goal.
+
+If you tell me whether this is **Angular** (it looks like it from `<app-root>`) and whether the UI is built into nginx, I’ll give you the exact file paths + Dockerfile snippet for your repo layout.
