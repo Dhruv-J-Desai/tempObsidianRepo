@@ -1,99 +1,106 @@
-Perfect — this screenshot proves **your font files are being served correctly**:
+Nice — this screenshot confirms **CSS is loading correctly** ✅
 
-- `curl -I http://localhost:8080/assets/fonts/...woff2` → **HTTP/1.1 200 OK**
+- `curl -I http://localhost:8080/styles-OLAOSOVV.css` → **HTTP/1.1 200 OK**
     
-- `Content-Type: font/woff2`
-    
-- and the files exist in `/opt/app-root/src/assets/fonts`
-    
-
-✅ So the problem is **not** “fonts missing in the container”.
-
-Now there are only 2 likely causes:
-
-## 1) Your CSS bundle isn’t actually loading (most common)
-
-When CSS isn’t loaded, the UI looks “messed up” exactly like your screenshot.
-
-Run these (from host or inside container):
-
-### Find the styles file name referenced by index.html
-
-```bash
-docker exec -it thales-edge sh -lc "grep -oE 'styles-[^\" ]+\\.css' /opt/app-root/src/index.html"
-```
-
-Suppose it prints: `styles-OLAOSOVV.css`
-
-### Check nginx is serving that CSS as CSS (NOT index.html)
-
-```bash
-docker exec -it thales-edge sh -lc "curl -I http://localhost:8080/styles-OLAOSOVV.css"
-docker exec -it thales-edge sh -lc "curl -s http://localhost:8080/styles-OLAOSOVV.css | head -n 5"
-```
-
-**What you want:**
-
 - `Content-Type: text/css`
     
-- body starts with CSS, **not** `<!doctype html>`
+- And the body you printed is real CSS (not `index.html`)
     
 
-If you see HTML, your SPA fallback is accidentally serving `index.html` for CSS/JS.
+So the “messed up” UI is **not** because nginx is serving HTML for CSS/JS.
 
-### Fix (nginx): add a static-files block before the SPA fallback
+That leaves 2 common causes:
+
+---
+
+## A) The font files are served, but the browser is **blocking** them (CORS / MIME / caching)
+
+Even though `curl -I` shows `Content-Type: font/woff2`, browsers can still block if headers are missing.
+
+Check headers for a font URL:
+
+```bash
+docker exec -it thales-edge sh -lc "curl -I http://localhost:8080/assets/fonts/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2"
+```
+
+If you **don’t** see `Access-Control-Allow-Origin`, add this to nginx:
 
 ```nginx
-# serve real static files, otherwise 404 (do NOT fall back to index.html)
-location ~* \.(css|js|map|woff2?|ttf|eot|svg|png|jpg|jpeg|gif|ico)$ {
+location ~* \.(woff2?|ttf|eot|otf)$ {
+  add_header Access-Control-Allow-Origin "*" always;
+  add_header Cache-Control "public, max-age=31536000, immutable";
   try_files $uri =404;
   access_log off;
 }
 ```
 
-Keep your SPA fallback after:
-
-```nginx
-location / {
-  try_files $uri $uri/ /index.html;
-}
-```
+(Fonts and CSS are same origin here, but some setups still hit CORS edge cases—this removes doubt.)
 
 ---
 
-## 2) The fonts are available, but the CSS never _references_ them
+## B) Your `@font-face` `src:` URLs in CSS don’t match the built output
 
-Let’s confirm your built CSS actually contains the `@font-face` rules:
+In Angular builds, the CSS often gets rewritten and sometimes paths change depending on `<base href>` and deploy URL.
+
+### 1) Confirm the CSS references the exact same path you’re curling:
 
 ```bash
-docker exec -it thales-edge sh -lc "grep -R \"@font-face\" -n /opt/app-root/src/styles-*.css | head"
-docker exec -it thales-edge sh -lc "grep -R \"assets/fonts\" -n /opt/app-root/src/styles-*.css | head"
+docker exec -it thales-edge sh -lc "grep -R \"assets/fonts\" -n /opt/app-root/src/styles-*.css | head -n 20"
 ```
 
-If these return nothing, then your `styles.scss` changes aren’t getting into the built output you copied into the image.
+You want to see:  
+`url(/assets/fonts/<file>.woff2)` ✅
+
+If it shows something like:
+
+- `url(assets/fonts/...)` (missing leading slash)
+    
+- `url(/opt/app-root/src/assets/fonts/...)` (wrong)
+    
+- `url(./assets/fonts/...)` (can break depending on base href)
+    
+
+**Best practice for SPA behind nginx root**:
+
+```css
+src: url("/assets/fonts/xxxx.woff2") format("woff2");
+```
 
 ---
 
-## One more “gotcha”: browser cache + same tag
+## Quick browser-side proof (fastest check)
 
-If you rebuilt the image but kept the same tag (like `latest`), your browser might still cache the old `styles-XXXX.css`.
+Open DevTools → **Network** tab → filter `woff2`:
 
-Do:
-
-- hard refresh (Ctrl+Shift+R), or open in incognito
+- If you see **404** → path mismatch (fix CSS path)
     
-- and recreate container:
+- If you see **200** but **(blocked)** or **CORS** → add nginx headers
     
+- If you see fonts load but still “messed up” → it’s **not fonts**, it’s layout CSS (likely Angular Material theme vars, or missing global styles)
+    
+
+---
+
+## One more thing: the “messed up” screenshot looks like “Material styles not applied”
+
+That happens when **theme variables** aren’t taking effect or the material CSS isn’t included the way you think.
+
+Confirm Material variables exist in the loaded CSS:
 
 ```bash
-docker compose up -d --build --force-recreate
+docker exec -it thales-edge sh -lc "grep -R \"--mat-sys\" -n /opt/app-root/src/styles-*.css | head"
 ```
+
+If this returns nothing, your theme build/config isn’t being included.
 
 ---
 
-If you paste the output of:
+### Send me just 2 outputs and I’ll tell you exactly which branch it is:
 
-1. the `grep styles-*.css` from `index.html`
-    
-2. the `curl -I` for that styles file  
-    …I’ll tell you immediately whether it’s nginx fallback or build/copy/caching.
+```bash
+docker exec -it thales-edge sh -lc "curl -I http://localhost:8080/assets/fonts/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2"
+```
+
+```bash
+docker exec -it thales-edge sh -lc "grep -R \"assets/fonts\" -n /opt/app-root/src/styles-*.css | head -n 10"
+```
