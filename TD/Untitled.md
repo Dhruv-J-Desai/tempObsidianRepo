@@ -1,93 +1,242 @@
-Perfect — this output is **exactly what we wanted** ✅
+Yep — “formalize via `/app_logs`” is exactly the right workaround pattern if **Dedicated vs Standard access mode** (or “shared”) changes what gets captured reliably.
 
-It proves:
+Here’s how to make it **work the same way on both All-purpose and Job compute**, with a clean “TDVIP standard”.
 
-- Your built CSS **does contain** the `@font-face` rules
+---
+
+## Goal
+
+✅ Every notebook/job writes **application logs** to:
+
+```
+/app_logs/<app>/<run_id>.log
+```
+
+✅ Datadog Agent tails `/app_logs/**` on **both**:
+
+- All-purpose clusters
     
-- And they reference the fonts with the **correct URL**:
+- Job clusters
     
 
-`src: url(/assets/fonts/<file>.woff2) format("woff2");`
+✅ Works regardless of “Dedicated” vs “Standard” access mode (as long as init scripts are allowed)
 
-So **the CSS path is correct**. Now the only question is: **is the browser actually downloading those `.woff2` files and using them?**
+---
 
-## Next 3 checks (in order)
+## 1) Standardize the platform setup (init scripts)
 
-### 1) Verify the font file is actually reachable + looks like a real woff2
+### A. Create ONE “common” init script for app logs
 
-Run:
+Make a script like:
+
+**`tdvip_app_logs_setup.sh`** (run on driver)
+
+What it should do:
+
+1. Create `/app_logs`
+    
+2. Make it writable
+    
+3. (Optional but recommended) create subfolders and set sticky bit
+    
+
+Example (bash):
 
 ```bash
-docker exec -it thales-edge sh -lc "curl -I http://localhost:8080/assets/fonts/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2"
-docker exec -it thales-edge sh -lc "curl -s --range 0-15 http://localhost:8080/assets/fonts/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2 | xxd"
+#!/bin/bash
+set -euo pipefail
+
+# Create app log dir
+mkdir -p /app_logs
+chmod 1777 /app_logs   # world-writable + sticky (safer than 777)
+
+# Optional: per-app dirs
+mkdir -p /app_logs/tdvip
+chmod 1777 /app_logs/tdvip
 ```
 
-Expected:
+### B. Update BOTH cluster config init scripts to tail `/app_logs`
 
-- `HTTP/1.1 200 OK`
+You already have:
+
+- `datadog_standard_cluster_driver_node_config.sh`
     
-- `Content-Type: font/woff2`
-    
-- The hex output should start with something like **`77 4f 46 32`** (that’s “wOF2”).
-    
-
-If instead it starts with `<html` or something, nginx is serving the wrong thing.
-
----
-
-### 2) Check in the browser (this is the real decider)
-
-Open DevTools → **Network** → filter `woff2` → refresh page.
-
-You should see those exact font files:
-
-- status **200**
-    
-- size **non-zero**
-    
-- **Type: font**
+- `datadog_job_cluster_driver_node_config.sh`
     
 
-If you see:
+Make sure **both** write a `spark.yaml` that includes:
 
-- **404** → nginx root/path mismatch
-    
-- **(blocked)** / **CORS** → add nginx header (below)
-    
-- **200** but “from disk cache” and still old → hard reload / disable cache
-    
+```yaml
+logs:
+  - type: file
+    path: /app_logs/*.log
+    source: spark
+    service: databricks
+  - type: file
+    path: /app_logs/*/*.log
+    source: spark
+    service: databricks
+  - type: file
+    path: /app_logs/*/*/*.log
+    source: spark
+    service: databricks
+```
 
-Hard reload:
-
-- Chrome DevTools open → right click refresh → **Empty cache and hard reload**
-    
-
----
-
-### 3) If fonts load but UI still “messed up”
-
-Then it’s **not fonts**. That table/layout issue usually means **Material theme CSS / global styles** aren’t applying the way you think.
-
-Quick check:
+Then enable logs + restart agent (like you already do):
 
 ```bash
-docker exec -it thales-edge sh -lc "grep -R \"--mat-sys\" -n /opt/app-root/src/styles-*.css | head"
+sed -i 's/logs_enabled: false/logs_enabled: true/' /etc/datadog-agent/datadog.yaml
+systemctl restart datadog-agent
 ```
 
-If that prints nothing, your Material theme variables aren’t in the shipped CSS.
+**Key point:** the **job-cluster script must include `/app_logs` too**, not only `/databricks/driver/logs`.
 
 ---
 
-## If DevTools shows CORS blocking fonts (add this nginx block)
+## 2) Enforce it everywhere (so nobody forgets)
 
-```nginx
-location ~* \.(woff2?|ttf|otf|eot)$ {
-  add_header Access-Control-Allow-Origin "*" always;
-  add_header Cache-Control "public, max-age=31536000, immutable";
-  try_files $uri =404;
-}
-```
+### Option 1 (best): Cluster Policy
+
+Create/modify a **cluster policy** so init scripts are required.
+
+- All-purpose policy includes:
+    
+    - `adb_datadog_install.sh`
+        
+    - `tdvip_app_logs_setup.sh`
+        
+    - `datadog_standard_cluster_driver_node_config.sh`
+        
+- Job policy includes:
+    
+    - `adb_datadog_install.sh`
+        
+    - `tdvip_app_logs_setup.sh`
+        
+    - `datadog_job_cluster_driver_node_config.sh`
+        
+
+This guarantees everyone gets identical logging.
+
+### Option 2: Global init script
+
+If your workspace allows it, make `tdvip_app_logs_setup.sh` a **global init script**, then you only maintain Datadog config per cluster type.
 
 ---
 
-If you paste the output of the **two curl commands** in step (1), I’ll tell you immediately whether nginx is serving the correct binary font (and what to fix if not).
+## 3) Give developers a “TDVIP logging wrapper” (Python)
+
+### A. Minimal Python logger that writes to /app_logs
+
+Use this in every notebook/job:
+
+```python
+import json, logging, os, time
+from datetime import datetime
+
+def tdvip_logger(app: str, run_id: str | None = None):
+    run_id = run_id or os.environ.get("DB_JOB_RUN_ID") or str(int(time.time()))
+    log_dir = f"/app_logs/{app}"
+    os.makedirs(log_dir, exist_ok=True)
+
+    path = f"{log_dir}/{run_id}.log"
+
+    logger = logging.getLogger(app)
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+
+    fh = logging.FileHandler(path)
+    fh.setLevel(logging.INFO)
+
+    class JsonFormatter(logging.Formatter):
+        def format(self, record):
+            payload = {
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "level": record.levelname,
+                "logger": record.name,
+                "message": record.getMessage(),
+                "app": app,
+                "run_id": run_id,
+                "job_id": os.environ.get("DB_JOB_ID"),
+                "task_run_id": os.environ.get("DB_TASK_RUN_ID"),
+                "cluster_id": os.environ.get("DB_CLUSTER_ID"),
+            }
+            return json.dumps(payload)
+
+    fh.setFormatter(JsonFormatter())
+    logger.addHandler(fh)
+    logger.propagate = False
+
+    logger.info(f"TDVIP logging started -> {path}")
+    return logger, path
+
+log, log_path = tdvip_logger(app="tdvip", run_id=None)
+log.info("hello from tdvip app_logs")
+```
+
+Now Datadog can parse JSON cleanly.
+
+---
+
+## 4) Spark / log4j logs
+
+You noticed log4j worked more reliably. That’s because Spark/Databricks already routes a lot of logs through JVM logging.
+
+To also land those into `/app_logs`, the “formal” approach is:
+
+- add a log4j appender (log4j2 config) pointing to `/app_logs/...`
+    
+
+In practice, easiest is:
+
+- keep Spark driver logs going to `/databricks/driver/logs/...`
+    
+- use `/app_logs` for _your app logs_ (structured JSON)
+    
+- in Datadog, you’ll have both streams
+    
+
+---
+
+## 5) Validation checklist (works on both compute types)
+
+On any cluster (job or all-purpose), run:
+
+```bash
+%sh
+ls -ald /app_logs
+cat /etc/datadog-agent/conf.d/spark.d/spark.yaml | sed -n '1,160p'
+grep -R "app_logs" -n /etc/datadog-agent/conf.d/spark.d/
+```
+
+And:
+
+```bash
+%sh
+grep -i "tailer" /var/log/datadog/agent.log | grep app_logs | tail -n 20
+```
+
+If you see lines like “Starting a new tailer … /app_logs/…”, you’re done.
+
+---
+
+## The “Dedicated compute issue” part
+
+This pattern avoids relying on:
+
+- notebook cell output capture
+    
+- special driver log routing behavior
+    
+- UI output
+    
+
+It turns logging into a **file tailing contract**:
+
+> “If you can write to `/app_logs`, Datadog can collect it.”
+
+That’s why it works consistently.
+
+---
+
+If you want, paste the **job-cluster driver config script** snippet around the `logs:` section, and I’ll tell you exactly what to add/change so `/app_logs` is included there too (same as standard).
