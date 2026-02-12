@@ -1,274 +1,219 @@
-Perfect — now we have the full picture. Let’s walk this **end-to-end clearly and architect it properly for TDVIP**.
+Perfect 👍 — let’s **lock this down cleanly for STANDARD (all-purpose) compute only**, using `/app_logs` since your environment already supports it via the existing init script.
+
+We will define:
+
+- ✅ Where logs are written
+    
+- ✅ How Python writes them
+    
+- ✅ How Datadog tails them
+    
+- ✅ What you search in Datadog
+    
+
+No log4j. Only Python logging.
 
 ---
 
-# 🔎 What Your Current Setup Actually Does
+# ✅ 1️⃣ Confirm Standard Cluster Init Script Supports `/app_logs`
 
-## 1️⃣ Job Cluster Init Script (your screenshot 1)
+From your screenshot, the standard cluster init script contains:
 
-It configures Datadog to tail:
+```yaml
+logs:
+  - type: file
+    path: /app_logs/*.log
+    source: spark
+    service: databricks
 
-```
-/databricks/driver/logs/*.log
+  - type: file
+    path: /app_logs/*/*.log
+    source: spark
+    service: databricks
+
+  - type: file
+    path: /app_logs/*/*/*.log
+    source: spark
+    service: databricks
 ```
 
 That means:
 
-✔ Datadog collects **driver logs only**  
-✔ It does NOT know about `/app_logs`  
-✔ It does NOT tail stdout explicitly  
-✔ It relies on Spark driver log files
-
-So on job clusters:
-
-> Anything not ending up in `/databricks/driver/logs/*.log` will not reach Datadog.
-
----
-
-## 2️⃣ Standard Cluster Init Script (your screenshot 2)
-
-This one explicitly adds:
+👉 Datadog agent is configured to tail:
 
 ```
-/app_logs/*.log
-/app_logs/*/*.log
-/app_logs/*/*/*.log
+/app_logs
 ```
 
-So on standard clusters:
-
-✔ Datadog tails `/app_logs`  
-✔ Datadog tails `/databricks/driver/logs/*.log`  
-✔ Both locations work
-
-This is why `/app_logs` works there.
+So we are safe.
 
 ---
 
-# 🧠 The Core Problem
+# ✅ 2️⃣ Standard Compute Logging Pattern (Python Only)
 
-You want:
-
-> “Formalize logging via app_logs so it works on both job and all-purpose clusters”
-
-But:
-
-- Job cluster init script does NOT include `/app_logs`
-    
-- You are not allowed to modify init scripts
-    
-- Job clusters do NOT auto-create `/app_logs`
-    
-- You cannot rely on Log4j
-    
-- You want Python logging only
-    
-
-So `/app_logs` cannot be the universal standard unless you:
-
-- Modify job init script (not allowed)
-    
-- Or ensure logs land in `/databricks/driver/logs/*.log`
-    
-
----
-
-# 💡 The Correct Enterprise Solution
-
-You standardize **at the application level**, not at filesystem level.
-
-### ✅ The Only Common Denominator Across Both Clusters:
-
-```
-Driver stdout/stderr
-→ ends up under /databricks/driver/logs/std*
-→ Datadog tails it (via driver logs config)
-```
-
-That works on:
-
-- Job cluster
-    
-- All-purpose cluster
-    
-- Dedicated compute
-    
-- Shared compute
-    
-
-No dependency on `/app_logs`.
-
----
-
-# 🏗 TDVIP Enterprise Logging Standard (FINAL FORM)
-
-## Rule 1
-
-> All TDVIP notebooks/jobs must log structured JSON to stdout using Python logging.
-
-## Rule 2
-
-> No direct file logging to /app_logs or /databricks paths.
-
----
-
-# ✅ The One True Universal Logger
-
-Drop this into a shared utility module:
+Use this in notebooks on standard compute:
 
 ```python
 import logging
-import sys
-import json
 import os
-from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 
-class TDVIPJsonFormatter(logging.Formatter):
-    def format(self, record):
-        log_entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "level": record.levelname,
-            "logger": record.name,
-            "message": record.getMessage(),
-            "job_id": os.getenv("DATABRICKS_JOB_ID"),
-            "run_id": os.getenv("DATABRICKS_RUN_ID"),
-            "cluster_id": os.getenv("DATABRICKS_CLUSTER_ID"),
-        }
-        return json.dumps(log_entry)
+LOG_DIR = "/app_logs"
+LOG_FILE = f"{LOG_DIR}/tdvip_app.log"
 
-def get_tdvip_logger(name="tdvip", level=logging.INFO):
-    logger = logging.getLogger(name)
-    logger.setLevel(level)
-    logger.handlers = []
-    logger.propagate = False
+# Ensure directory exists
+os.makedirs(LOG_DIR, exist_ok=True)
 
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(TDVIPJsonFormatter())
+logger = logging.getLogger("TDVIP_APP")
+logger.setLevel(logging.INFO)
+
+# Prevent duplicate handlers
+if not logger.handlers:
+    handler = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=10_000_000,
+        backupCount=3
+    )
+
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+    )
+
+    handler.setFormatter(formatter)
     logger.addHandler(handler)
 
-    return logger
+# Also print to stdout (good practice)
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(formatter)
+logger.addHandler(stream_handler)
+
+logger.propagate = False
+
+logger.info("Standard cluster logging initialized")
 ```
 
-Usage:
+---
+
+# ✅ 3️⃣ What Happens Internally
+
+### Flow:
+
+```
+Python logger
+        ↓
+/app_logs/tdvip_app.log
+        ↓
+Datadog agent (file tail)
+        ↓
+Datadog Logs Explorer
+```
+
+---
+
+# ✅ 4️⃣ Verify on Standard Cluster
+
+Run:
 
 ```python
-log = get_tdvip_logger("MY_JOB")
+logger.error("STANDARD_CLUSTER_TEST_123")
+```
 
-log.info("Job started")
-log.warning("Validation issue")
-log.error("Failure happened")
+Then check:
+
+```bash
+%sh
+ls -al /app_logs
+cat /app_logs/tdvip_app.log
+```
+
+You should see your log line.
+
+---
+
+# ✅ 5️⃣ Verify Datadog Agent Is Tailing It
+
+Run:
+
+```bash
+%sh
+cat /etc/datadog-agent/conf.d/spark.d/spark.yaml
+```
+
+Confirm you see:
+
+```
+path: /app_logs/*.log
+```
+
+Then check agent activity:
+
+```bash
+cat /var/log/datadog/agent.log | grep app_logs
+```
+
+You should see file tailer activity.
+
+---
+
+# ✅ 6️⃣ What To Search in Datadog
+
+Go to:
+
+**Logs → Live Tail**
+
+Search:
+
+```
+STANDARD_CLUSTER_TEST_123
+```
+
+Or:
+
+```
+source:spark
+```
+
+Or:
+
+```
+service:databricks
 ```
 
 ---
 
-# 🔁 What Happens Behind the Scenes
+# ✅ 7️⃣ Why This Works on Standard
 
-Python logging  
-⬇  
-stdout  
-⬇  
-Spark driver captures stdout  
-⬇  
-Written to `/databricks/driver/logs/stdout`  
-⬇  
-Datadog tails `/databricks/driver/logs/*.log`  
-⬇  
-Appears in Datadog
-
-Works on both cluster types.
-
----
-
-# 📌 Why This Solves Your Dedicated Compute Issue
-
-Dedicated compute restriction usually affects:
-
-- Direct file writes
-    
-- Permission controlled directories
-    
-- Init script modifications
-    
-
-But stdout is:
-
-- Always available
-    
-- Always captured
-    
-- Always written to driver logs
-    
-
-So it bypasses filesystem permission differences.
-
----
-
-# 🛑 Why Not `/app_logs` As Standard?
-
-Because:
-
-|Cluster Type|/app_logs available?|Datadog tails it?|
-|---|---|---|
-|Standard|Yes|Yes|
-|Job|No|No|
-
-So it cannot be the universal standard.
-
----
-
-# 📈 If You Want to Be Extra Clean
-
-In Datadog, create a log processing pipeline that:
-
-- Parses JSON
-    
-- Extracts job_id
-    
-- Extracts run_id
-    
-- Sets service=tdvip
-    
-- Sets environment tag
-    
-
-Then your logs become fully structured.
-
----
-
-# 🧩 Final Architecture Decision
-
-### TDVIP Logging Standard
+Because your standard cluster init script explicitly added:
 
 ```
-Python logging
-→ Structured JSON
-→ stdout only
-→ No file writes
-→ No log4j
-→ No /app_logs dependency
+/app_logs/*.log
 ```
+
+The job cluster script did NOT.
+
+That’s the difference.
 
 ---
 
-# 🚀 If Leadership Asks:
+# 🔥 Final Clean Architecture for Standard Compute
 
-> “Why not use /app_logs?”
-
-Your answer:
-
-Because job clusters are not configured to tail that location and we are not allowed to modify init scripts. Logging to stdout ensures compatibility across all compute types without infrastructure changes.
+|Layer|Value|
+|---|---|
+|Log location|`/app_logs/*.log`|
+|Logging library|Python `logging`|
+|Datadog tail config|spark.yaml|
+|Cluster type|Standard (all-purpose)|
+|Agent enabled|`logs_enabled: true`|
 
 ---
 
 If you want, I can now:
 
-- 🔹 Create a TDVIP Logging Confluence-ready design page
+- Show how to make this JSON structured for Datadog parsing
     
-- 🔹 Create a reusable pip-installable tdvip-logging package structure
+- Show how to unify this into a reusable TDVIP logging module
     
-- 🔹 Show how to validate in Datadog Live Tail step-by-step
-    
-- 🔹 Design a logging governance checklist for LOB onboarding
+- Or show how to extend this to job clusters safely
     
 
-Tell me which direction you want next.
+Your standard compute setup is now fully clear and correct.
