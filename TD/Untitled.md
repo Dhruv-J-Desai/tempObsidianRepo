@@ -1,78 +1,99 @@
-Yes — **your path in `styles.scss` is correct** _for the way your app is being served_.
+Perfect — this screenshot proves **your font files are being served correctly**:
 
-From your screenshot, the built files end up here:
-
-- `dist/thales-edge/browser/assets/fonts/<file>.woff2`
+- `curl -I http://localhost:8080/assets/fonts/...woff2` → **HTTP/1.1 200 OK**
+    
+- `Content-Type: font/woff2`
+    
+- and the files exist in `/opt/app-root/src/assets/fonts`
     
 
-And your nginx `root` is:
+✅ So the problem is **not** “fonts missing in the container”.
 
-- `root /opt/app-root/src;`
-    
+Now there are only 2 likely causes:
 
-So the browser URL that maps to that is:
+## 1) Your CSS bundle isn’t actually loading (most common)
 
-- `/assets/fonts/<file>.woff2`
-    
+When CSS isn’t loaded, the UI looks “messed up” exactly like your screenshot.
 
-✅ That matches what you wrote:
+Run these (from host or inside container):
 
-```scss
-src: url("/assets/fonts/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2") format("woff2");
-```
-
-### But here’s the key detail:
-
-In your screenshot the filenames look like:
-
-- `flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2`
-    
-- `KFO7CnqEu92Fr1ME7kSn66aGLdTyIUAMa3GUBGEe.woff2`
-    
-
-Your CSS must match **exactly** (case + dashes). So do this:
-
-```scss
-@font-face {
-  font-family: "Roboto";
-  src: url("/assets/fonts/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2") format("woff2");
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "Roboto";
-  src: url("/assets/fonts/KFO7CnqEu92Fr1ME7kSn66aGLdTyIUAMa3GUBGEe.woff2") format("woff2");
-  font-weight: 500;
-  font-style: normal;
-  font-display: swap;
-}
-```
-
-### Super important check (this will tell the truth instantly)
-
-From inside the container, run:
+### Find the styles file name referenced by index.html
 
 ```bash
-docker exec -it thales-edge sh -lc 'curl -I http://localhost:8080/assets/fonts/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2'
+docker exec -it thales-edge sh -lc "grep -oE 'styles-[^\" ]+\\.css' /opt/app-root/src/index.html"
 ```
 
-If it returns **200**, path is correct.  
-If it returns **404** or **200 with text/html**, nginx is still falling back to index.html (needs the `/assets/` block I sent earlier).
+Suppose it prints: `styles-OLAOSOVV.css`
 
-### One more improvement
-
-Since you’re using nginx root `/opt/app-root/src`, make sure your container actually has:
-
-`/opt/app-root/src/assets/fonts/...`
-
-Run:
+### Check nginx is serving that CSS as CSS (NOT index.html)
 
 ```bash
-docker exec -it thales-edge sh -lc 'ls -l /opt/app-root/src/assets/fonts'
+docker exec -it thales-edge sh -lc "curl -I http://localhost:8080/styles-OLAOSOVV.css"
+docker exec -it thales-edge sh -lc "curl -s http://localhost:8080/styles-OLAOSOVV.css | head -n 5"
 ```
 
-If your fonts are _instead_ inside something like `/opt/app-root/src/browser/assets/...`, then the URL path is correct but the **files are copied to the wrong folder** in the image.
+**What you want:**
 
-If you paste the output of the two commands (`ls` and `curl -I`), I’ll tell you exactly which case it is and what to change (CSS vs Docker COPY vs nginx).
+- `Content-Type: text/css`
+    
+- body starts with CSS, **not** `<!doctype html>`
+    
+
+If you see HTML, your SPA fallback is accidentally serving `index.html` for CSS/JS.
+
+### Fix (nginx): add a static-files block before the SPA fallback
+
+```nginx
+# serve real static files, otherwise 404 (do NOT fall back to index.html)
+location ~* \.(css|js|map|woff2?|ttf|eot|svg|png|jpg|jpeg|gif|ico)$ {
+  try_files $uri =404;
+  access_log off;
+}
+```
+
+Keep your SPA fallback after:
+
+```nginx
+location / {
+  try_files $uri $uri/ /index.html;
+}
+```
+
+---
+
+## 2) The fonts are available, but the CSS never _references_ them
+
+Let’s confirm your built CSS actually contains the `@font-face` rules:
+
+```bash
+docker exec -it thales-edge sh -lc "grep -R \"@font-face\" -n /opt/app-root/src/styles-*.css | head"
+docker exec -it thales-edge sh -lc "grep -R \"assets/fonts\" -n /opt/app-root/src/styles-*.css | head"
+```
+
+If these return nothing, then your `styles.scss` changes aren’t getting into the built output you copied into the image.
+
+---
+
+## One more “gotcha”: browser cache + same tag
+
+If you rebuilt the image but kept the same tag (like `latest`), your browser might still cache the old `styles-XXXX.css`.
+
+Do:
+
+- hard refresh (Ctrl+Shift+R), or open in incognito
+    
+- and recreate container:
+    
+
+```bash
+docker compose up -d --build --force-recreate
+```
+
+---
+
+If you paste the output of:
+
+1. the `grep styles-*.css` from `index.html`
+    
+2. the `curl -I` for that styles file  
+    …I’ll tell you immediately whether it’s nginx fallback or build/copy/caching.
