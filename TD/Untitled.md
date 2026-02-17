@@ -1,3 +1,24 @@
+Yes — below is a **complete, production-ready notebook example** that:
+
+1. Detects whether it’s **job compute** or **standard (interactive)**
+    
+2. Always logs to **STDOUT**
+    
+3. If it’s a **job cluster**, additionally writes to  
+    `/databricks/driver/logs/tdvip_app.log`
+    
+4. If it’s **standard**, just uses STDOUT (you can extend if needed)
+    
+5. Falls back safely if file writing fails
+    
+
+You can paste this as a single notebook cell.
+
+---
+
+# ✅ Complete Notebook Logging Code (Works for Both)
+
+```python
 import os
 import sys
 import logging
@@ -87,3 +108,79 @@ log.info("TDVIP logging initialized.")
 log.info("Testing INFO level")
 log.warning("Testing WARNING level")
 log.error("Testing ERROR level")
+```
+
+---
+
+# 🔍 What Happens Now
+
+### If running on **Job Compute**
+
+- Logs appear in:
+    
+    - Workflows → Run → Output
+        
+    - Driver logs
+        
+- Also written to:
+    
+    ```
+    /databricks/driver/logs/tdvip_app.log
+    ```
+    
+- Datadog (if tailing that path) should pick it up.
+    
+
+---
+
+### If running on **Standard Compute**
+
+- Logs appear in notebook cell output.
+    
+- No dependency on `/app_logs`
+    
+- No init script needed.
+    
+
+---
+
+# 🧠 Why This Is Safe
+
+- No init script
+    
+- No systemctl
+    
+- No apt-get
+    
+- No permission-sensitive OS calls
+    
+- STDOUT always works
+    
+- File logging is best-effort only
+    
+
+---
+
+# 🎯 Important Reality
+
+If Datadog is already tailing:
+
+```
+/databricks/driver/logs/*.log
+```
+
+Then this will work for job clusters.
+
+If Datadog is tailing something else (like `/app_logs`), you’d adjust that path accordingly.
+
+---
+
+If you’d like, I can also provide a version that:
+
+- Emits structured JSON logs
+    
+- Includes correlation IDs
+    
+- Is reusable as a TDVIP logging utility module
+    
+- Or auto-detects and disables file logging if permissions fail silently
