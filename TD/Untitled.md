@@ -1,3 +1,4 @@
+```python
 # Databricks notebook source
 # TDVIP logger that works on BOTH:
 # - Job compute: writes to /databricks/driver/logs/<file>.log (Datadog already tails it)
@@ -137,3 +138,4 @@ log.info("TDVIP logging initialized.")
 log.info("Testing INFO level")
 log.warning("Testing WARNING level")
 log.error("Testing ERROR level")
+```
