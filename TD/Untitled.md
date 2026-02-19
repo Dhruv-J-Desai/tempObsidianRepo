@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional
 # -------------------------
 # 1) Context detection
 # -------------------------
+```python
 def _safe_get_dbutils_context_tags() -> Dict[str, str]:
     """
     Returns context tags if running in Databricks.
@@ -237,7 +238,4 @@ log = setup_tdv_logger(
 log.info("Testing INFO level")
 log.warning("Testing WARNING level")
 log.error("Testing ERROR level")
-
-# Optional: show recent file(s) if job cluster and writing to /databricks/driver/logs
-# %sh
-# ls -lah /databricks/driver/logs | tail -n 30
+```
