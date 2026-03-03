@@ -1,159 +1,67 @@
-Perfect — this confirms your environment is **fully locked down from public GitHub** 👇
+Yep — that explains the job failure. If the `.bundle/.../files` folder is empty, then **your bundle deploy didn’t actually sync `notebook.py` into the workspace**, so the job can’t find it at runtime.
 
-The error:
+This is usually because **bundles only upload (“sync”) files that are included by the bundle’s sync rules**, and your `notebook.py` isn’t being included.
 
-```
-git clone failed
-fatal: unable to update url base from redirection
-```
+## Fix it the clean way (recommended)
 
-Means:
+### 1) Put your script under a `src/` folder
 
-👉 Your corporate network is blocking / rewriting GitHub access  
-👉 Public GitHub templates cannot be cloned  
-👉 This is expected in TD enterprise environment
-
-So we stop trying to pull public templates.
-
----
-
-# ✅ The Correct Enterprise-Safe Approach
-
-We create the bundle **manually**.
-
-No:
-
-- Public GitHub
-    
-- uv
-    
-- hatchling
-    
-- PyPI
-    
-- Serverless
-    
-- Templates
-    
-
-Just pure minimal YAML.
-
----
-
-# 🚀 Step-by-Step (Clean Setup)
-
-### 1️⃣ Create folder
+From your local `td-bundle/` folder:
 
 ```bash
-mkdir td-bundle
-cd td-bundle
+mkdir -p src
+mv notebook.py src/notebook.py
 ```
 
----
+### 2) Update `databricks.yml` to point to the workspace uploaded path
 
-### 2️⃣ Create `databricks.yml`
-
-Create a file named:
-
-```
-databricks.yml
-```
-
-Put this inside:
+Change:
 
 ```yaml
-bundle:
-  name: td-bundle
-
-targets:
-  dev:
-    workspace:
-      host: https://adb-3218410855619456.16.azuredatabricks.net
-
-resources:
-  jobs:
-    td-simple-job:
-      name: td-simple-job
-      tasks:
-        - task_key: task1
-          notebook_task:
-            notebook_path: ./notebook.py
-          new_cluster:
-            spark_version: 13.3.x-scala2.12
-            node_type_id: Standard_DS3_v2
-            num_workers: 1
+python_file: ${workspace.file_path}/notebook.py
 ```
 
----
+to:
 
-### 3️⃣ Create `notebook.py`
-
-Create:
-
-```
-notebook.py
+```yaml
+python_file: ${workspace.file_path}/src/notebook.py
 ```
 
-Put:
+### 3) Add an explicit sync include (so it definitely uploads)
 
-```python
-print("Hello TDVIP Asset Bundle")
+Add this to `databricks.yml` (top-level):
+
+```yaml
+sync:
+  include:
+    - "src/**"
 ```
 
----
-
-### 4️⃣ Deploy
+### 4) Redeploy
 
 ```bash
-databricks bundle validate --profile adb-3218410855619456
 databricks bundle deploy -t dev --profile adb-3218410855619456
 ```
 
 ---
 
-# 🎯 Why This Will Work
+## Verify it actually uploaded (don’t rely only on the UI)
 
-Because:
+Run:
 
-- No artifact build
-    
-- No uv
-    
-- No PyPI
-    
-- No GitHub template
-    
-- No serverless requirement
-    
-- Only classic cluster
-    
+```bash
+databricks workspace ls "/Workspace/Users/robin.bajaj@dev-td.com/.bundle/td-bundle/dev/files" --profile adb-3218410855619456
+databricks workspace ls "/Workspace/Users/robin.bajaj@dev-td.com/.bundle/td-bundle/dev/files/src" --profile adb-3218410855619456
+```
 
-Fully compatible with TD dev03.
+You should see `notebook.py` under `src/`.
 
 ---
 
-# 🧠 Important Concept
+### Why the UI shows “No files”
 
-What you’re discovering is:
-
-Asset Bundles are powerful, but:
-
-- The official templates assume open internet
-    
-- Enterprise banks like TD block external package sources
-    
-- So minimal YAML-first approach is safest
-    
+Databricks sometimes doesn’t render “workspace files” the same way in the Workspace browser, but the **CLI `workspace ls` is the source of truth**. If `workspace ls` shows empty, it truly didn’t sync.
 
 ---
 
-If you want next, we can:
-
-- Convert this into a proper **multi-environment TD bundle structure**
-    
-- Or design how this integrates with your GitHub TD-Enterprise repo
-    
-- Or align it with Terraform-managed cluster policies
-    
-
-You’re now at the real starting point 👍
+If you paste your current `databricks.yml` (just the `sync:` part if you already have one, plus the task), I’ll tell you exactly what to change line-by-line.
