@@ -1,113 +1,199 @@
-For a **GET** request, you generally should **not use request body**.
+Yes — this can be made cleaner and easier to maintain.
 
-Use **query parameters** instead.
+Main improvements:
 
-So for your Postman mock:
+- define the input params once
+    
+- avoid repeating the same lookup logic 3 times
+    
+- separate:
+    
+    - registered API check
+        
+    - approved path check
+        
+    - final call
+        
+- keep the error messages clear
+    
 
-### Better approach
+Use this cleaner version:
 
-Endpoint:
+```sql
+CREATE OR REPLACE FUNCTION `d4001-centralus-tdvip-tdsbi_catalog`.bronze.call_governed_api(
+  api_name STRING,
+  req_path STRING
+)
+RETURNS STRING
+LANGUAGE SQL
+RETURN
+WITH params AS (
+  SELECT
+    api_name AS p_api_name,
+    req_path AS p_req_path
+),
+api_rows AS (
+  SELECT
+    g.*
+  FROM `d4001-centralus-tdvip-tdsbi_catalog`.bronze.api_governance_registry g
+  CROSS JOIN params p
+  WHERE g.api_name = p.p_api_name
+    AND g.approved = true
+),
+matched_rows AS (
+  SELECT
+    g.*
+  FROM api_rows g
+  CROSS JOIN params p
+  WHERE
+    (g.path_url_type = 'EXACT'  AND p.p_req_path = g.path_value)
+    OR
+    (g.path_url_type = 'PREFIX' AND p.p_req_path LIKE concat(g.path_value, '%'))
+),
+final_call AS (
+  SELECT
+    `d4001-centralus-tdvip-tdsbi_catalog`.bronze.http_get(
+      concat(base_url, (SELECT p_req_path FROM params))
+    ) AS response
+  FROM matched_rows
+  LIMIT 1
+)
+SELECT
+  CASE
+    WHEN (SELECT COUNT(*) FROM api_rows) = 0
+      THEN concat(
+        'ERROR: API ''',
+        api_name,
+        ''' is not registered in api_governance_registry'
+      )
+
+    WHEN (SELECT COUNT(*) FROM matched_rows) = 0
+      THEN concat(
+        'ERROR: Path ''',
+        req_path,
+        ''' is not approved for API ''',
+        api_name,
+        ''''
+      )
+
+    ELSE (SELECT response FROM final_call)
+  END;
+```
+
+## Why this is better
+
+Your original version repeated:
+
+- the same table scan
+    
+- the same `CROSS JOIN`
+    
+- the same path-matching logic
+    
+
+This version:
+
+- computes the matching rows once
+    
+- reuses them
+    
+- is easier to debug
+    
+
+## One more improvement for dynamic query params
+
+If you want `/udf-demo?...` to match a registered base path `/udf-demo`, use base-path matching instead of full-path matching.
+
+Use this version instead:
+
+```sql
+CREATE OR REPLACE FUNCTION `d4001-centralus-tdvip-tdsbi_catalog`.bronze.call_governed_api(
+  api_name STRING,
+  req_path STRING
+)
+RETURNS STRING
+LANGUAGE SQL
+RETURN
+WITH params AS (
+  SELECT
+    api_name AS p_api_name,
+    req_path AS p_req_path,
+    split(req_path, '\\?')[0] AS p_base_path
+),
+api_rows AS (
+  SELECT
+    g.*
+  FROM `d4001-centralus-tdvip-tdsbi_catalog`.bronze.api_governance_registry g
+  CROSS JOIN params p
+  WHERE g.api_name = p.p_api_name
+    AND g.approved = true
+),
+matched_rows AS (
+  SELECT
+    g.*
+  FROM api_rows g
+  CROSS JOIN params p
+  WHERE
+    (g.path_url_type = 'EXACT'  AND p.p_base_path = g.path_value)
+    OR
+    (g.path_url_type = 'PREFIX' AND p.p_base_path LIKE concat(g.path_value, '%'))
+),
+final_call AS (
+  SELECT
+    `d4001-centralus-tdvip-tdsbi_catalog`.bronze.http_get(
+      concat(base_url, (SELECT p_req_path FROM params))
+    ) AS response
+  FROM matched_rows
+  LIMIT 1
+)
+SELECT
+  CASE
+    WHEN (SELECT COUNT(*) FROM api_rows) = 0
+      THEN concat(
+        'ERROR: API ''',
+        api_name,
+        ''' is not registered in api_governance_registry'
+      )
+
+    WHEN (SELECT COUNT(*) FROM matched_rows) = 0
+      THEN concat(
+        'ERROR: Path ''',
+        req_path,
+        ''' is not approved for API ''',
+        api_name,
+        ''''
+      )
+
+    ELSE (SELECT response FROM final_call)
+  END;
+```
+
+## Best version for your case
+
+Use the **second version** if you are passing dynamic query parameters like:
 
 ```text
-GET /udf-demo/echo
+/udf-demo?limit_id=80986&limit_name=Energy%20Delta&is_active=TRUE
 ```
 
-Parameters go in the URL, like:
+because it will validate against `/udf-demo` instead of the entire query string.
 
-```text
-/udf-demo/echo?limit_id=80986&limit_name=Energy%20Delta&is_active=TRUE
+## Even cleaner error wording
+
+You can also make the error more precise:
+
+```sql
+THEN concat(
+  'ERROR: API ''', api_name,
+  ''' is registered, but path ''', req_path,
+  ''' is not approved'
+)
 ```
 
-## Why
+If you want, I can also make this return:
 
-Because GET requests usually pass inputs through:
-
-- query params
+- HTTP status only
     
-- path params
+- full response body
     
-
-not request body.
-
-## In Postman mock server
-
-You can define the request as:
-
-- Method: `GET`
-    
-- URL: `{{url}}/udf-demo/echo`
-    
-
-Then the response body can still use variables like:
-
-```json
-{
-  "status": "success",
-  "message": "Mock API called successfully",
-  "limit_id": "{{limit_id}}",
-  "limit_name": "{{limit_name}}",
-  "is_active": "{{is_active}}"
-}
-```
-
-## So what to do in that screen
-
-For the request body column:
-
-- leave it empty for GET
-    
-
-Instead, later when calling the mock URL, pass parameters in the URL itself.
-
-## If you really want request body
-
-Then use **POST**, not GET.
-
-Example:
-
-### Endpoint
-
-```text
-POST /udf-demo/process-row
-```
-
-### Request body
-
-```json
-{
-  "limit_id": "80986",
-  "limit_name": "Energy Delta",
-  "is_active": "TRUE"
-}
-```
-
-### Response body
-
-```json
-{
-  "status": "success",
-  "message": "Row processed successfully",
-  "limit_id": "{{limit_id}}",
-  "limit_name": "{{limit_name}}",
-  "is_active": "{{is_active}}"
-}
-```
-
-But for your Databricks demo, **GET with query params is simpler**.
-
-## Recommendation
-
-Use:
-
-- **GET**
-    
-- no request body
-    
-- pass row values as query params
-    
-
-So the answer is:
-
-**For GET, leave request body empty. Use query parameters instead.**
-
-If you want, I can next give you the exact mock URL pattern and the Databricks function code to call it per row.
+- or JSON with `status`, `approved`, and `message`.
