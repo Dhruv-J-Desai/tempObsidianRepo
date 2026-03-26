@@ -1,33 +1,96 @@
-You’re right to call that out.
+Yes — here is the full code using **PREFIX** for dynamic params.
 
-In the PySpark helper, the **governed part is only present if** this function already exists and is used as the enforcement layer:
+This includes:
 
-```sql
-`d4001-centralus-tdvip-tdsbi_catalog`.bronze.call_governed_api(api_name, req_path)
-```
-
-So the full governed solution should include **both**:
-
-1. the governed UC SQL function
+1. governance table
     
-2. the PySpark wrapper that routes every row through it
+2. sample registration with `PREFIX`
     
-
-Below is the full version.
+3. low-level HTTP function
+    
+4. governed UC function
+    
+5. PySpark wrapper
+    
 
 ---
 
-## 1. Governed API function in UC
+## 1. Governance table
 
-This function:
+```sql
+CREATE TABLE IF NOT EXISTS `d4001-centralus-tdvip-tdsbi_catalog`.bronze.api_governance_registry (
+    api_name STRING,
+    base_url STRING,
+    path_url_type STRING,   -- EXACT or PREFIX
+    path_value STRING,
+    approved BOOLEAN,
+    owner_team STRING,
+    notes STRING
+);
+```
 
-- checks whether the API is registered
+---
+
+## 2. Register endpoint using PREFIX
+
+Use `PREFIX` when query params will be appended.
+
+```sql
+INSERT INTO `d4001-centralus-tdvip-tdsbi_catalog`.bronze.api_governance_registry
+(api_name, base_url, path_url_type, path_value, approved, owner_team, notes)
+VALUES
+(
+  'postman_mock',
+  'https://f0ea5df4-0ce9-45dc-9a86-06fce04fdb58.mock.pstmn.io',
+  'PREFIX',
+  '/udf-demo',
+  true,
+  'TDSBI',
+  'Allows dynamic query params under /udf-demo'
+);
+```
+
+You can verify:
+
+```sql
+SELECT *
+FROM `d4001-centralus-tdvip-tdsbi_catalog`.bronze.api_governance_registry;
+```
+
+---
+
+## 3. Low-level HTTP caller
+
+```sql
+CREATE OR REPLACE FUNCTION `d4001-centralus-tdvip-tdsbi_catalog`.bronze.http_call(
+    full_url STRING
+)
+RETURNS STRING
+LANGUAGE PYTHON
+AS $$
+import requests
+
+try:
+    r = requests.get(full_url, timeout=10)
+    return str(r.status_code)
+except Exception as e:
+    return f"ERROR: {str(e)}"
+$$;
+```
+
+---
+
+## 4. Governed API function
+
+This is the governed layer.
+
+- checks API registration
     
-- checks whether the path is approved
+- checks approval
     
-- if approved, calls the low-level HTTP function
+- checks path against registry
     
-- otherwise returns a governed error
+- uses `PREFIX` when query params are present
     
 
 ```sql
@@ -45,12 +108,24 @@ RETURN
                 FROM `d4001-centralus-tdvip-tdsbi_catalog`.bronze.api_governance_registry g
                 CROSS JOIN (SELECT api_name AS p_api_name) params
                 WHERE g.api_name = params.p_api_name
-                  AND g.approved = true
             ) = 0
             THEN concat(
                 'ERROR: API ''',
                 api_name,
                 ''' is not registered in api_governance_registry'
+            )
+
+            WHEN (
+                SELECT COUNT(*)
+                FROM `d4001-centralus-tdvip-tdsbi_catalog`.bronze.api_governance_registry g
+                CROSS JOIN (SELECT api_name AS p_api_name) params
+                WHERE g.api_name = params.p_api_name
+                  AND g.approved = true
+            ) = 0
+            THEN concat(
+                'ERROR: API ''',
+                api_name,
+                ''' is registered but not approved'
             )
 
             WHEN (
@@ -91,20 +166,20 @@ RETURN
 
 ---
 
-## 2. PySpark wrapper that uses the governed function
+## 5. PySpark wrapper
 
-This version:
+This lets the user pass:
 
-- reads the CSV from Volume
+- `csv_path`
     
-- lets user pass `api_name`, `endpoint`, and optional params
+- `api_name`
     
-- builds `req_path`
+- `endpoint`
     
-- calls the **governed** UC function for each row
+- optional params
     
-- never takes raw `base_url` from the user
-    
+
+No hardcoded CSV columns inside the function.
 
 ```python
 from pyspark.sql import functions as F
@@ -117,20 +192,20 @@ def process_csv_api_calls_governed(
     output_table: str | None = None
 ):
     """
-    Reads a CSV from Volume storage, builds a governed request path per row,
-    and invokes the UC governed function call_governed_api(api_name, req_path).
+    Reads a CSV from Volume storage, builds request paths per row,
+    and routes each row through the governed UC function.
 
-    params format:
+    params example:
     {
-        "param_name": {"type": "column", "value": "Column Name"},
-        "param2": {"type": "literal", "value": "fixed_value"}
+        "limit_id": {"type": "column", "value": "Limit ID"},
+        "env": {"type": "literal", "value": "prod"}
     }
     """
 
     # Read CSV
     df = spark.read.csv(csv_path, header=True, inferSchema=True)
 
-    # Build req_path dynamically
+    # Build req_path
     req_path = F.lit(endpoint)
 
     if params:
@@ -161,7 +236,7 @@ def process_csv_api_calls_governed(
     # Register temp view
     df.createOrReplaceTempView("csv_input_tmp")
 
-    # Route every row through the governed UC function
+    # Call governed UC function per row
     result_df = spark.sql(f"""
         SELECT
             *,
@@ -180,9 +255,9 @@ def process_csv_api_calls_governed(
 
 ---
 
-## 3. Example usage
+## 6. Example usage
 
-### Example with CSV columns plus literal params
+### Example with dynamic params from CSV columns
 
 ```python
 result_df = process_csv_api_calls_governed(
@@ -192,7 +267,23 @@ result_df = process_csv_api_calls_governed(
     params={
         "limit_id": {"type": "column", "value": "Limit ID"},
         "limit_name": {"type": "column", "value": "Limit Name"},
-        "is_active": {"type": "column", "value": "Is Active"},
+        "is_active": {"type": "column", "value": "Is Active"}
+    }
+)
+
+display(result_df)
+```
+
+### Example with mixed column and literal values
+
+```python
+result_df = process_csv_api_calls_governed(
+    csv_path="/Volumes/d4001-centralus-tdvip-tdsbi_catalog/bronze/idr_poc_limits/sample_limit_energy_updated.csv",
+    api_name="postman_mock",
+    endpoint="/udf-demo",
+    params={
+        "limit_id": {"type": "column", "value": "Limit ID"},
+        "region": {"type": "literal", "value": "us-east"},
         "env": {"type": "literal", "value": "prod"}
     }
 )
@@ -205,8 +296,8 @@ display(result_df)
 ```python
 result_df = process_csv_api_calls_governed(
     csv_path="/Volumes/d4001-centralus-tdvip-tdsbi_catalog/bronze/idr_poc_limits/sample_limit_energy_updated.csv",
-    api_name="repo_td",
-    endpoint="/"
+    api_name="postman_mock",
+    endpoint="/udf-demo"
 )
 
 display(result_df)
@@ -214,21 +305,28 @@ display(result_df)
 
 ---
 
-## 4. Why this is governed
+## 7. Why PREFIX is needed here
 
-This is now governed because:
+If a row builds:
 
-- user passes only `api_name`
-    
-- `base_url` is resolved from `api_governance_registry`
-    
-- path approval is checked in `call_governed_api`
-    
-- unapproved paths return governed error messages
-    
-- Spark only orchestrates row processing
-    
+```text
+/udf-demo?limit_id=80986&limit_name=Energy%20Delta
+```
 
-So yes, the governed part is not in the Python helper itself — it is intentionally centralized in the UC SQL function.
+then this will match registry row:
 
-If you want, I can also give you a cleaner version where the wrapper does not use a temp view and instead uses `selectExpr`.
+```text
+path_url_type = PREFIX
+path_value = /udf-demo
+```
+
+but it would **not** match:
+
+```text
+path_url_type = EXACT
+path_value = /udf-demo
+```
+
+So for dynamic params, `PREFIX` is the right registration with your current logic.
+
+If you want, I can also give you a cleaner version that strips query params first, so you can still register `/udf-demo` as `EXACT`.
