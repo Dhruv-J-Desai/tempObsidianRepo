@@ -1,274 +1,244 @@
-Here’s a full governed pattern version.
+Yes — you can keep the same governance idea in PySpark.
 
-It does this:
+Meaning:
 
-- Spark reads the CSV from the Volume
+- **Spark** reads the CSV
     
-- Spark builds a per-row request path
+- **PySpark** checks the governance registry
     
-- Unity Catalog governance table controls allowed APIs/paths
+- **PySpark** builds the approved full URL
     
-- UC SQL function validates and calls the HTTP function
+- **PySpark** calls the HTTP function only for approved rows
     
-- Spark stores the result per row
+- otherwise returns governed error messages
+    
+
+So it becomes the PySpark equivalent of your SQL `call_governed_api`.
+
+## Recommended approach
+
+### Keep these 2 things
+
+- `api_governance_registry` table
+    
+- low-level HTTP caller function or direct requests call in Spark logic
+    
+
+### Move this logic into PySpark
+
+Like your SQL function, do these checks in order:
+
+1. Is `api_name` registered and approved?
+    
+2. Is `req_path` allowed for that API?
+    
+3. If yes, make the call
+    
+4. Else return clear error
     
 
 ---
 
-## 1. Governance table
-
-```sql
-CREATE TABLE IF NOT EXISTS `d4001-centralus-tdvip-tdsbi_catalog`.bronze.api_governance_registry (
-  api_name STRING,
-  base_url STRING,
-  path_url_type STRING,   -- EXACT or PREFIX
-  path_value STRING,
-  approved BOOLEAN,
-  owner_team STRING,
-  notes STRING
-);
-```
-
----
-
-## 2. Sample registry rows
-
-```sql
-INSERT INTO `d4001-centralus-tdvip-tdsbi_catalog`.bronze.api_governance_registry
-(api_name, base_url, path_url_type, path_value, approved, owner_team, notes)
-VALUES
-('repo_td', 'https://repo.td.com', 'EXACT', '/', true, 'TD', 'Root endpoint'),
-('repo_td', 'https://repo.td.com', 'PREFIX', '/#browse/search/', true, 'TD', 'Allow search child paths'),
-('postman_mock', 'https://f0ea5df4-0ce9-45dc-9a86-06fce04fdb58.mock.pstmn.io', 'PREFIX', '/udf-demo', true, 'TD', 'Mock endpoint');
-```
-
----
-
-## 3. Low-level HTTP function
-
-```sql
-CREATE OR REPLACE FUNCTION `d4001-centralus-tdvip-tdsbi_catalog`.bronze.http_call(
-  full_url STRING
-)
-RETURNS STRING
-LANGUAGE PYTHON
-AS $$
-import requests
-import json
-
-try:
-    r = requests.get(full_url, timeout=10, verify=False)
-    return json.dumps({
-        "status": r.status_code,
-        "response": r.text[:500]
-    })
-except Exception as e:
-    return json.dumps({
-        "error": str(e)
-    })
-$$;
-```
-
----
-
-## 4. Governed UC function
-
-This validates `api_name` and `req_path` against the governance table before calling the HTTP function.
-
-```sql
-CREATE OR REPLACE FUNCTION `d4001-centralus-tdvip-tdsbi_catalog`.bronze.call_governed_api(
-  api_name STRING,
-  req_path STRING
-)
-RETURNS STRING
-LANGUAGE SQL
-RETURN
-WITH params AS (
-  SELECT
-    api_name AS p_api_name,
-    req_path AS p_req_path,
-    split(req_path, '\\?')[0] AS p_base_path
-),
-api_rows AS (
-  SELECT g.*
-  FROM `d4001-centralus-tdvip-tdsbi_catalog`.bronze.api_governance_registry g
-  CROSS JOIN params p
-  WHERE g.api_name = p.p_api_name
-    AND g.approved = true
-),
-matched_rows AS (
-  SELECT g.*
-  FROM api_rows g
-  CROSS JOIN params p
-  WHERE
-    (g.path_url_type = 'EXACT'  AND p.p_base_path = g.path_value)
-    OR
-    (g.path_url_type = 'PREFIX' AND p.p_base_path LIKE concat(g.path_value, '%'))
-),
-final_call AS (
-  SELECT
-    `d4001-centralus-tdvip-tdsbi_catalog`.bronze.http_call(
-      concat(base_url, (SELECT p_req_path FROM params))
-    ) AS response
-  FROM matched_rows
-  LIMIT 1
-)
-SELECT
-  CASE
-    WHEN (SELECT COUNT(*) FROM api_rows) = 0 THEN
-      concat(
-        'ERROR: API ''',
-        api_name,
-        ''' is not registered in api_governance_registry'
-      )
-    WHEN (SELECT COUNT(*) FROM matched_rows) = 0 THEN
-      concat(
-        'ERROR: Path ''',
-        req_path,
-        ''' is not approved for API ''',
-        api_name,
-        ''''
-      )
-    ELSE
-      (SELECT response FROM final_call)
-  END;
-```
-
----
-
-## 5. PySpark wrapper
-
-This is the part that reads the CSV from the Volume and routes each row through the governed UC function.
+## Better PySpark governed pattern
 
 ```python
 from pyspark.sql import functions as F
 
-def process_csv_api_calls(
+def process_csv_api_calls_governed(
     csv_path: str,
     api_name: str,
-    output_table: str | None = None,
-    limit_rows: int | None = None
+    endpoint_col_expr,
+    output_table: str | None = None
 ):
-    # Read CSV from Volume
-    df = spark.read.option("header", "true").csv(csv_path)
+    # 1. Read CSV from Volume
+    df = spark.read.csv(csv_path, header=True, inferSchema=True)
 
-    # Optional row limit for testing
-    if limit_rows is not None:
-        df = df.limit(limit_rows)
+    # 2. Build req_path per row
+    df = df.withColumn("req_path", endpoint_col_expr)
 
-    # Build dynamic request path per row
-    # Adjust column names here if needed
+    # 3. Load governance registry for this API only
+    registry_df = (
+        spark.table("d4001-centralus-tdvip-tdsbi_catalog.bronze.api_governance_registry")
+        .filter((F.col("api_name") == api_name) & (F.col("approved") == True))
+        .select("api_name", "base_url", "path_url_type", "path_value")
+    )
+
+    # 4. Check whether API exists at all
+    if registry_df.limit(1).count() == 0:
+        return df.withColumn(
+            "api_result",
+            F.lit(f"ERROR: API '{api_name}' is not registered in api_governance_registry")
+        )
+
+    # 5. Join each row with registry rows for same API
+    joined = df.crossJoin(registry_df)
+
+    # 6. Match EXACT or PREFIX rules
+    matched = joined.filter(
+        (
+            (F.col("path_url_type") == "EXACT") &
+            (F.col("req_path") == F.col("path_value"))
+        ) |
+        (
+            (F.col("path_url_type") == "PREFIX") &
+            (F.col("req_path").startswith(F.col("path_value")))
+        )
+    )
+
+    # 7. Rows that matched governance
+    approved_rows = matched.withColumn(
+        "full_url",
+        F.concat(F.col("base_url"), F.col("req_path"))
+    )
+
+    # 8. Rows that did not match governance
+    unapproved_rows = df.join(
+        matched.select(*df.columns).distinct(),
+        on=df.columns,
+        how="left_anti"
+    ).withColumn(
+        "api_result",
+        F.concat(
+            F.lit("ERROR: Path '"),
+            F.col("req_path"),
+            F.lit(f"' is not approved for API '{api_name}'")
+        )
+    )
+
+    # 9. Call governed SQL function per approved row
+    approved_rows.createOrReplaceTempView("approved_rows_tmp")
+
+    result_approved = spark.sql(f"""
+        SELECT
+            *,
+            `d4001-centralus-tdvip-tdsbi_catalog`.bronze.call_governed_api('{api_name}', req_path) AS api_result
+        FROM approved_rows_tmp
+    """)
+
+    # 10. Union both
+    final_df = result_approved.select(*df.columns, "api_result").unionByName(
+        unapproved_rows.select(*df.columns, "api_result")
+    )
+
+    if output_table:
+        final_df.write.mode("overwrite").saveAsTable(output_table)
+
+    return final_df
+```
+
+---
+
+## Example usage
+
+For your limits CSV:
+
+```python
+from pyspark.sql import functions as F
+
+result_df = process_csv_api_calls_governed(
+    csv_path="/Volumes/d4001-centralus-tdvip-tdsbi_catalog/bronze/idr_poc_limits/sample_limit_energy_updated.csv",
+    api_name="postman_mock",
+    endpoint_col_expr=F.concat(
+        F.lit("/udf-demo?limit_id="),
+        F.col("Limit ID").cast("string"),
+        F.lit("&limit_name="),
+        F.regexp_replace(F.col("Limit Name"), " ", "%20"),
+        F.lit("&is_active="),
+        F.col("Is Active").cast("string")
+    )
+)
+
+display(result_df)
+```
+
+---
+
+## Cleaner version
+
+If you do **not** want Spark to do the approval join itself, then the simplest governed PySpark design is:
+
+- Spark reads CSV
+    
+- Spark builds `req_path`
+    
+- Spark calls **only** `call_governed_api(api_name, req_path)` per row
+    
+
+That is actually closer to your current SQL governance.
+
+### Simpler PySpark version
+
+```python
+from pyspark.sql import functions as F
+
+def process_csv_via_governed_function(csv_path: str, api_name: str):
+    df = spark.read.csv(csv_path, header=True, inferSchema=True)
+
     df = df.withColumn(
         "req_path",
         F.concat(
             F.lit("/udf-demo?limit_id="),
-            F.col("Limit ID"),
+            F.col("Limit ID").cast("string"),
             F.lit("&limit_name="),
             F.regexp_replace(F.col("Limit Name"), " ", "%20"),
             F.lit("&is_active="),
-            F.col("Is Active")
+            F.col("Is Active").cast("string")
         )
     )
 
-    # Register temp view so SQL can call governed UC function row by row
-    df.createOrReplaceTempView("tmp_api_input")
+    df.createOrReplaceTempView("csv_input_tmp")
 
-    result_df = spark.sql(f"""
+    return spark.sql(f"""
         SELECT
-            `Limit ID`,
-            `Limit Name`,
-            `Is Active`,
-            req_path,
-            `d4001-centralus-tdvip-tdsbi_catalog`.bronze.call_governed_api(
-                '{api_name}',
-                req_path
-            ) AS api_result
-        FROM tmp_api_input
+            *,
+            `d4001-centralus-tdvip-tdsbi_catalog`.bronze.call_governed_api('{api_name}', req_path) AS api_result
+        FROM csv_input_tmp
     """)
-
-    # Parse JSON result if returned
-    result_df = (
-        result_df
-        .withColumn("status_code", F.get_json_object(F.col("api_result"), "$.status").cast("int"))
-        .withColumn("response_body", F.get_json_object(F.col("api_result"), "$.response"))
-        .withColumn("error", F.get_json_object(F.col("api_result"), "$.error"))
-    )
-
-    if output_table:
-        result_df.write.mode("overwrite").saveAsTable(output_table)
-
-    return result_df
 ```
+
+This is probably the **best** option for you.
+
+Because:
+
+- governance stays centralized in UC SQL function
+    
+- PySpark just orchestrates file reading and row shaping
+    
+- it is easier to explain and maintain
+    
 
 ---
 
-## 6. Call the PySpark wrapper
+## Recommendation
 
-```python
-results = process_csv_api_calls(
-    csv_path="/Volumes/d4001-centralus-tdvip-tdsbi_catalog/bronze/idr_poc_limits/sample_limit_energy_updated.csv",
-    api_name="postman_mock",   # or repo_td
-    output_table="d4001-centralus-tdvip-tdsbi_catalog.bronze.api_call_results_demo",
-    limit_rows=3
-)
+Use this model:
 
-results.show(truncate=False)
-```
+### PySpark responsibility
 
----
-
-## 7. If you want to use `repo_td` instead
-
-Replace the request-path builder in the PySpark wrapper with something simpler:
-
-```python
-df = df.withColumn("req_path", F.lit("/"))
-```
-
-or:
-
-```python
-df = df.withColumn("req_path", F.lit("/#browse/search/maven"))
-```
-
-Then call:
-
-```python
-results = process_csv_api_calls(
-    csv_path="/Volumes/d4001-centralus-tdvip-tdsbi_catalog/bronze/idr_poc_limits/sample_limit_energy_updated.csv",
-    api_name="repo_td",
-    limit_rows=3
-)
-```
-
----
-
-## 8. Optional audit table
-
-```sql
-CREATE TABLE IF NOT EXISTS `d4001-centralus-tdvip-tdsbi_catalog`.bronze.api_call_results_demo (
-  `Limit ID` STRING,
-  `Limit Name` STRING,
-  `Is Active` STRING,
-  req_path STRING,
-  api_result STRING,
-  status_code INT,
-  response_body STRING,
-  error STRING
-);
-```
-
----
-
-## What this gives you
-
-- file reading stays in Spark
+- read CSV
     
-- governance stays in Unity Catalog
+- filter rows
     
-- no raw HTTP calls directly from Spark business logic
-    
-- every row goes through the governed UC function
+- build dynamic request path
     
 
-If you want, I can also give you a cleaner version with row filters like `Is Active = TRUE` already built in.
+### UC governed function responsibility
+
+- validate API registration
+    
+- validate allowed path
+    
+- execute HTTP call
+    
+- return error if not approved
+    
+
+That gives you the same governance model as before, just with Spark handling file processing.
+
+## What to tell Eilam
+
+You can say:
+
+> I can keep the same governance model in PySpark by letting Spark handle the CSV read and row-level request-path construction, while still routing each row through the UC governed function for validation and execution. So Spark would orchestrate the batch/file processing, but the actual API approval logic would remain centralized in the governance registry and governed function.
+
+If you want, I can rewrite your exact notebook code into this simpler governed PySpark version.
