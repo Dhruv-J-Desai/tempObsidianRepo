@@ -1,149 +1,110 @@
-Based on your Mosaic relationship diagram, `latest_equity_prices` **does have `cusip`**, so the main join to `dim_instrument` should be on:
+Got it. Since Databricks physical column names are different from Strategy/Mosaic display names, use the **Databricks column names** directly.
 
-```sql
-lep.cusip = di.cusip
-```
-
-Use this query in Databricks / Free-form SQL:
+Based on your screenshots, use this query:
 
 ```sql
 SELECT
-    -- Main latest equity price fields
-    lep.ticker,
-    lep.equity_name,
-    lep.security_type,
-    lep.exchange AS price_exchange,
-    lep.currency_code AS price_currency_code,
-    lep.cusip,
-    lep.snapshot_date,
-    lep.snapshot_start_time,
-    lep.snapshot_end_time,
-    lep.source_file_name,
+    -- Latest equity price fields
+    lep.TICKER AS ticker,
+    lep.NAME AS equity_name,
+    lep.PRICE AS latest_price,
+    lep.EXCH_CODE AS exchange_code,
+    lep.CRNCY AS currency_code,
+    lep.SECURITY_TYP AS security_type,
+    lep.ID_ISIN AS isin,
+    lep.ID_CUSIP AS cusip,
+    lep.DL_SNAPSHOT_DATE AS snapshot_date,
+    lep.DL_SNAPSHOT_START_TIME AS snapshot_start_time,
+    lep.DL_SNAPSHOT_END_TIME AS snapshot_end_time,
+    lep.`$file` AS source_file_name,
 
     -- Instrument details
-    di.instrument,
+    di.instrument_id,
+    di.symbol,
     di.instrument_type,
-    di.asset_class AS instrument_asset_class,
-    di.issuer,
-    di.isin,
-    di.is_active,
-    di.lot_size,
-    di.exchange AS instrument_exchange,
+    di.asset_class_code,
+    di.issuer_id,
+    di.primary_exchange_id,
     di.currency_code AS instrument_currency_code,
+    di.lot_size,
+    di.tick_size,
+    di.is_active,
 
     -- Asset class details
-    da.asset_class AS asset_class_name,
-    da.`Asset Class (2)` AS asset_class_group,
+    da.asset_class_name,
 
     -- Issuer details
+    dis.issuer_name,
+    dis.issuer_lei,
     dis.credit_rating,
-    dis.industry,
-    dis.sector,
     dis.country_code AS issuer_country_code,
+    dis.sector_id,
+    dis.industry_id,
 
     -- Exchange details
+    de.exchange_id,
+    de.exchange_name,
+    de.mic_code,
     de.country_code AS exchange_country_code,
-    de.time_zone AS exchange_time_zone,
-
-    -- Currency details
-    rc.currency AS currency_name,
+    de.timezone AS exchange_timezone,
 
     -- Country / region details
-    rco.country AS exchange_country,
-    rco.region AS exchange_region
+    rco.country_name AS exchange_country,
+    rco.region AS exchange_region,
+
+    -- Currency details
+    rc.currency_name,
+    rc.symbol AS currency_symbol
 
 FROM `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.latest_equity_prices lep
 
 LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.dim_instrument di
-    ON lep.cusip = di.cusip
+    ON lep.ID_CUSIP = di.cusip
 
 LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.dim_asset_class da
-    ON di.asset_class = da.asset_class
+    ON di.asset_class_code = da.asset_class_code
 
 LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.dim_issuer dis
-    ON di.issuer = dis.issuer
+    ON di.issuer_id = dis.issuer_id
 
 LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.dim_exchange de
-    ON lep.exchange = de.exchange
-
-LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.ref_currency rc
-    ON lep.currency_code = rc.currency_code
+    ON lep.EXCH_CODE = de.mic_code
 
 LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.ref_country rco
-    ON de.country_code = rco.country_code;
+    ON de.country_code = rco.country_code
+
+LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.ref_currency rc
+    ON lep.CRNCY = rc.currency_code;
 ```
 
-One small thing: if `Asset Class (2)` fails because of the space/parentheses, first run:
+If `lep.EXCH_CODE = de.mic_code` does not match well, use this alternate exchange join:
 
 ```sql
-DESCRIBE `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.dim_asset_class;
+LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.dim_exchange de
+    ON di.primary_exchange_id = de.exchange_id
 ```
 
-Then use the actual Databricks column name. It may be something like:
-
-```sql
-asset_class_2
-```
-
-Before using this in Mosaic, validate row duplication:
+For testing the join quality, run this first:
 
 ```sql
 SELECT
-    COUNT(*) AS joined_row_count,
-    COUNT(DISTINCT lep.cusip) AS distinct_cusip_count,
-    COUNT(DISTINCT lep.ticker) AS distinct_ticker_count
+    COUNT(*) AS total_rows,
+    COUNT(di.instrument_id) AS matched_instruments,
+    COUNT(de.exchange_id) AS matched_exchanges,
+    COUNT(rc.currency_code) AS matched_currencies,
+    COUNT(da.asset_class_code) AS matched_asset_classes,
+    COUNT(dis.issuer_id) AS matched_issuers
 FROM `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.latest_equity_prices lep
 LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.dim_instrument di
-    ON lep.cusip = di.cusip
+    ON lep.ID_CUSIP = di.cusip
 LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.dim_asset_class da
-    ON di.asset_class = da.asset_class
+    ON di.asset_class_code = da.asset_class_code
 LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.dim_issuer dis
-    ON di.issuer = dis.issuer
+    ON di.issuer_id = dis.issuer_id
 LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.dim_exchange de
-    ON lep.exchange = de.exchange
+    ON lep.EXCH_CODE = de.mic_code
 LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.ref_currency rc
-    ON lep.currency_code = rc.currency_code
-LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.ref_country rco
-    ON de.country_code = rco.country_code;
+    ON lep.CRNCY = rc.currency_code;
 ```
 
-For dashboard testing, you can also create a lighter version:
-
-```sql
-SELECT
-    lep.ticker,
-    lep.equity_name,
-    lep.security_type,
-    lep.exchange,
-    lep.currency_code,
-    lep.cusip,
-    lep.snapshot_date,
-
-    di.instrument,
-    di.instrument_type,
-    di.asset_class,
-    di.issuer,
-    di.isin,
-
-    dis.industry,
-    dis.sector,
-    dis.credit_rating,
-
-    rc.currency,
-    rco.country,
-    rco.region
-
-FROM `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.latest_equity_prices lep
-LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.dim_instrument di
-    ON lep.cusip = di.cusip
-LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.dim_issuer dis
-    ON di.issuer = dis.issuer
-LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.ref_currency rc
-    ON lep.currency_code = rc.currency_code
-LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.dim_exchange de
-    ON lep.exchange = de.exchange
-LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.ref_country rco
-    ON de.country_code = rco.country_code;
-```
-
-This lighter query is probably better for your dashboard because it avoids pulling too many columns.
+This will tell you whether the joins are actually matching or returning nulls.
