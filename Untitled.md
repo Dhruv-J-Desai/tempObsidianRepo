@@ -1,269 +1,220 @@
-For **Strategy Mosaic Model**, use this SQL as a **Free-form SQL source** and make the output look like a clean curated dataset. The main idea is:
+Below is a **Databricks SQL Notebook script** you can use to create the tables shown in your screenshot.
 
-> Instead of importing all 6 tables separately and relying on auto-detected relationships, create one joined dataset from Databricks and then build the Mosaic Model/dashboard on top of that.
-
-## Recommended Mosaic dataset name
-
-Use something like:
-
-```text
-equity_price_instrument_analytics
-```
-
-or
-
-```text
-latest_equity_price_dashboard_model
-```
-
-## Use this SQL in Free-form SQL
-
-This version is good for Mosaic because the aliases are dashboard-friendly and consistent:
+I used simple data types because the screenshot shows the table/column names but not exact source data types. You can later change `STRING`, `DATE`, `TIMESTAMP`, `INT`, or `DOUBLE` based on the actual Aspen source schema.
 
 ```sql
-SELECT
-    -- Latest equity price fields
-    lep.TICKER AS ticker,
-    lep.NAME AS equity_name,
-    lep.PRICE AS latest_price,
-    lep.EXCH_CODE AS exchange_code,
-    lep.CRNCY AS currency_code,
-    lep.SECURITY_TYP AS security_type,
-    lep.ID_ISIN AS isin,
-    lep.ID_CUSIP AS cusip,
-    lep.DL_SNAPSHOT_DATE AS snapshot_date,
-    lep.DL_SNAPSHOT_START_TIME AS snapshot_start_time,
-    lep.DL_SNAPSHOT_END_TIME AS snapshot_end_time,
-    lep.`$file` AS source_file_name,
+-- Optional: set your catalog and schema first
+-- USE CATALOG your_catalog_name;
+-- USE SCHEMA your_schema_name;
 
-    -- Instrument details
-    di.instrument_id,
-    di.symbol,
-    di.instrument_type,
-    di.asset_class_code,
-    di.issuer_id,
-    di.primary_exchange_id,
-    di.currency_code AS instrument_currency_code,
-    di.lot_size,
-    di.tick_size,
-    di.is_active,
-
-    -- Asset class details
-    da.asset_class_name,
-
-    -- Issuer details
-    dis.issuer_name,
-    dis.issuer_lei,
-    dis.credit_rating,
-    dis.country_code AS issuer_country_code,
-    dis.sector_id,
-    dis.industry_id,
-
-    -- Exchange details
-    de.exchange_id,
-    de.exchange_name,
-    de.mic_code,
-    de.country_code AS exchange_country_code,
-    de.timezone AS exchange_timezone,
-
-    -- Country / region details
-    rco.country_name AS exchange_country,
-    rco.region AS exchange_region,
-
-    -- Currency details
-    rc.currency_name,
-    rc.symbol AS currency_symbol
-
-FROM `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.latest_equity_prices lep
-
-LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.dim_instrument di
-    ON lep.ID_CUSIP = di.cusip
-
-LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.dim_asset_class da
-    ON di.asset_class_code = da.asset_class_code
-
-LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.dim_issuer dis
-    ON di.issuer_id = dis.issuer_id
-
-LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.dim_exchange de
-    ON lep.EXCH_CODE = de.mic_code
-
-LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.ref_country rco
-    ON de.country_code = rco.country_code
-
-LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.ref_currency rc
-    ON lep.CRNCY = rc.currency_code;
+CREATE TABLE IF NOT EXISTS tbl_dim_doc_aspen (
+    DocID STRING,
+    Title STRING,
+    PublishDate DATE,
+    DocumentType STRING,
+    StrategistID STRING,
+    Contribute_Group STRING
+)
+USING DELTA;
 ```
-
-## After importing into Mosaic Model
-
-In Mosaic, classify fields like this:
-
-### Attributes
-
-Use these as attributes:
-
-```text
-ticker
-equity_name
-exchange_code
-currency_code
-security_type
-isin
-cusip
-instrument_id
-symbol
-instrument_type
-asset_class_code
-issuer_id
-asset_class_name
-issuer_name
-issuer_lei
-credit_rating
-issuer_country_code
-sector_id
-industry_id
-exchange_id
-exchange_name
-mic_code
-exchange_country_code
-exchange_timezone
-exchange_country
-exchange_region
-currency_name
-currency_symbol
-source_file_name
-```
-
-### Date/time attributes
-
-Use these as date/time fields:
-
-```text
-snapshot_date
-snapshot_start_time
-snapshot_end_time
-```
-
-### Metrics
-
-Create metrics on top of the imported dataset:
-
-```text
-Total Securities = CountDistinct(cusip)
-
-Total Tickers = CountDistinct(ticker)
-
-Average Latest Price = Avg(latest_price)
-
-Maximum Latest Price = Max(latest_price)
-
-Minimum Latest Price = Min(latest_price)
-
-Total Exchanges = CountDistinct(exchange_code)
-
-Total Currencies = CountDistinct(currency_code)
-
-Total Issuers = CountDistinct(issuer_id)
-```
-
-For boolean `is_active`, avoid `Sum(is_active)` because Databricks/Spark does not allow summing boolean directly. Create a metric using a filter, or add this to SQL:
 
 ```sql
-CASE WHEN di.is_active = true THEN 1 ELSE 0 END AS is_active_flag
+CREATE TABLE IF NOT EXISTS tbl_readership_aspen (
+    DataUploadDatetime TIMESTAMP,
+    DocID STRING,
+    ReaderID STRING,
+    AccountID STRING,
+    Channel STRING,
+    ReadDateTime TIMESTAMP,
+    IPAddress STRING,
+    LinkClick INT,
+    CountryCode STRING,
+    system_source STRING,
+    ProspectTradingClient STRING,
+    Hit_BM_ID STRING
+)
+USING DELTA;
 ```
-
-Then in Mosaic:
-
-```text
-Active Instrument Count = Sum(is_active_flag)
-```
-
-## Suggested SQL improvement for Mosaic
-
-I would add this field now to avoid the boolean issue:
 
 ```sql
-CASE WHEN di.is_active = true THEN 1 ELSE 0 END AS is_active_flag
+CREATE TABLE IF NOT EXISTS lookup_countrytoregion_aspen (
+    CountryCode STRING,
+    Country STRING,
+    Region STRING
+)
+USING DELTA;
 ```
 
-Place it near `di.is_active`.
+```sql
+CREATE TABLE IF NOT EXISTS tbl_dim_reader_aspen (
+    ReaderID STRING,
+    ReaderEmail STRING,
+    ReaderName STRING
+)
+USING DELTA;
+```
 
-Then your Mosaic model will have both:
+```sql
+CREATE TABLE IF NOT EXISTS tbl_producttag_rpt_aspen (
+    DataUploadDatetime TIMESTAMP,
+    DocID STRING,
+    Hits INT,
+    SentEmails INT,
+    LinkViews INT,
+    EmailViews INT,
+    HitShare DOUBLE,
+    EmailShare DOUBLE,
+    EmailReads INT,
+    NonEmailReads INT,
+    Rates INT,
+    Rates_Sovereigns INT,
+    Rates_Derivatives INT,
+    Rates_Regulatory INT,
+    Rates_Inflation INT,
+    Rates_Short_End INT,
+    Rates_Spread_Products INT,
+    Rates_ESG INT,
+    Macro INT,
+    Macro_Politics INT,
+    Macro_Central_Bank INT,
+    Macro_Inflation INT,
+    Macro_Growth INT,
+    Macro_Trade INT,
+    Macro_ESG INT,
+    EM INT
+)
+USING DELTA;
+```
+
+```sql
+CREATE TABLE IF NOT EXISTS lookup_strategist_aspen (
+    StrategistID STRING,
+    Strategists STRING,
+    StrategistsNoComma STRING,
+    Position STRING,
+    StrategistCountry STRING,
+    StrategistTeam STRING,
+    ProductCovered STRING,
+    Region STRING,
+    Cty STRING,
+    ActiveInactive STRING
+)
+USING DELTA;
+```
+
+```sql
+CREATE TABLE IF NOT EXISTS tbl_bmcontacts_aspen (
+    DataUploadDatetime TIMESTAMP,
+    ID STRING,
+    FirstName STRING,
+    LastName STRING,
+    ReaderID STRING,
+    Account STRING,
+    ContactOwner STRING,
+    Status STRING,
+    Tier STRING,
+    IPRestriction STRING,
+    Address1 STRING,
+    Email_BBG STRING,
+    Email_Corp STRING,
+    Opted_In_Out STRING,
+    Region STRING,
+    Client_NonClient STRING,
+    Email STRING
+)
+USING DELTA;
+```
+
+```sql
+CREATE TABLE IF NOT EXISTS lookup_regionbyclientcountry_aspen (
+    ClientCountryStateProv STRING,
+    RegionBroad1 STRING,
+    RegionNarrow1 STRING,
+    StateProvinceCountry STRING,
+    RegionBroad2 STRING,
+    RegionNarrow2 STRING
+)
+USING DELTA;
+```
+
+```sql
+CREATE TABLE IF NOT EXISTS tbl_meetingtracker_aspen (
+    DataUploadDatetime TIMESTAMP,
+    MeetingID STRING,
+    Date DATE,
+    StrategistID STRING,
+    AccountID STRING,
+    MeetingType STRING,
+    PrimarySales STRING,
+    OtherSales STRING,
+    OtherStrat STRING,
+    TopicDiscussed STRING,
+    Desk STRING,
+    ClientCountryStateProv STRING,
+    Notes STRING,
+    ClientArea STRING,
+    ClientRegion STRING,
+    ClientLocation STRING
+)
+USING DELTA;
+```
+
+```sql
+CREATE TABLE IF NOT EXISTS lookup_accountpropername_clienttype_aspen (
+    AccountID STRING,
+    AccountNameRaw STRING,
+    AccountProperName STRING,
+    ClientType STRING,
+    SFClientCode STRING,
+    ParentEntity STRING,
+    MurexID STRING
+)
+USING DELTA;
+```
+
+### Optional: add constraints / primary-key style metadata
+
+Databricks does not enforce primary keys like a traditional database in most Delta table scenarios, but you can still document them using constraints if your workspace supports informational constraints.
+
+```sql
+ALTER TABLE tbl_dim_doc_aspen
+ADD CONSTRAINT pk_tbl_dim_doc_aspen PRIMARY KEY (DocID) NOT ENFORCED;
+
+ALTER TABLE tbl_dim_reader_aspen
+ADD CONSTRAINT pk_tbl_dim_reader_aspen PRIMARY KEY (ReaderID) NOT ENFORCED;
+
+ALTER TABLE lookup_countrytoregion_aspen
+ADD CONSTRAINT pk_lookup_countrytoregion_aspen PRIMARY KEY (CountryCode) NOT ENFORCED;
+
+ALTER TABLE lookup_strategist_aspen
+ADD CONSTRAINT pk_lookup_strategist_aspen PRIMARY KEY (StrategistID) NOT ENFORCED;
+
+ALTER TABLE lookup_accountpropername_clienttype_aspen
+ADD CONSTRAINT pk_lookup_accountpropername_clienttype_aspen PRIMARY KEY (AccountID) NOT ENFORCED;
+
+ALTER TABLE lookup_regionbyclientcountry_aspen
+ADD CONSTRAINT pk_lookup_regionbyclientcountry_aspen PRIMARY KEY (ClientCountryStateProv) NOT ENFORCED;
+```
+
+### Suggested relationship mapping for Mosaic / BI model
+
+After creating these tables, the main relationships appear to be:
 
 ```text
-is_active
-is_active_flag
+tbl_readership_aspen.DocID          -> tbl_dim_doc_aspen.DocID
+tbl_readership_aspen.ReaderID       -> tbl_dim_reader_aspen.ReaderID
+tbl_readership_aspen.CountryCode    -> lookup_countrytoregion_aspen.CountryCode
+tbl_readership_aspen.DocID          -> tbl_producttag_rpt_aspen.DocID
+
+tbl_dim_doc_aspen.StrategistID      -> lookup_strategist_aspen.StrategistID
+
+tbl_bmcontacts_aspen.ReaderID       -> tbl_dim_reader_aspen.ReaderID
+tbl_bmcontacts_aspen.Account        -> lookup_accountpropername_clienttype_aspen.AccountID
+
+tbl_meetingtracker_aspen.StrategistID -> lookup_strategist_aspen.StrategistID
+tbl_meetingtracker_aspen.AccountID    -> lookup_accountpropername_clienttype_aspen.AccountID
+tbl_meetingtracker_aspen.ClientCountryStateProv
+    -> lookup_regionbyclientcountry_aspen.ClientCountryStateProv
 ```
 
-Use `is_active` for filtering and `is_active_flag` for metrics.
-
-## Dashboard ideas using this Mosaic dataset
-
-### KPI cards
-
-```text
-Total Securities
-Total Tickers
-Average Latest Price
-Total Exchanges
-Total Currencies
-Latest Snapshot Date
-```
-
-### Charts
-
-```text
-Securities by Exchange
-Metric: CountDistinct(ticker)
-Attribute: exchange_name or exchange_code
-```
-
-```text
-Securities by Asset Class
-Metric: CountDistinct(cusip)
-Attribute: asset_class_name
-```
-
-```text
-Average Price by Security Type
-Metric: Avg(latest_price)
-Attribute: security_type
-```
-
-```text
-Securities by Currency
-Metric: CountDistinct(cusip)
-Attribute: currency_name
-```
-
-```text
-Securities by Region
-Metric: CountDistinct(cusip)
-Attribute: exchange_region
-```
-
-### Detail grid
-
-Use:
-
-```text
-ticker
-equity_name
-latest_price
-exchange_name
-currency_name
-security_type
-asset_class_name
-issuer_name
-credit_rating
-exchange_country
-exchange_region
-snapshot_date
-```
-
-## Best Confluence note for this approach
-
-```text
-Instead of importing all related tables separately into the Mosaic Model, a curated Free-form SQL dataset was created using Databricks physical column names and explicit joins. This avoids confusion caused by Strategy renaming source columns during import and reduces dependency on auto-detected relationships. The resulting dataset includes only the required dashboard fields from latest equity prices, instrument, asset class, issuer, exchange, country, and currency tables. This approach provides a cleaner semantic layer for dashboard creation and makes validation against Databricks SQL easier.
-```
+For quick initial testing in Databricks, start with the `CREATE TABLE` statements only. Once the tables are created and sample data is loaded, then validate the joins before building the Mosaic Model.
