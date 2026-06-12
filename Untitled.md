@@ -1,155 +1,139 @@
-Yes — start this dashboard page using only these **two tables**:
+You do not see data because the measures are probably filtering on:
 
-```text
-cib_tbl_dim_doc
-cib_tbl_readership
+```DAX
+TODAY() - 7
 ```
 
-Relationship needed:
+But your sample data may not have records in the **actual last 7 days from today**. So Power BI returns blank.
 
-```text
-cib_tbl_dim_doc[DocID]  1 → *  cib_tbl_readership[DocID]
-```
+For testing, use the **latest date available in your data** instead of `TODAY()`.
 
-## Goal
+## Fix the DAX measures
 
-Create two table visuals:
+Create/replace these measures in `cib_tbl_readership`.
 
-```text
-Top Documents - Last 7 Days
-Top Documents - Last 30 Days
-```
-
-Each table should show:
-
-```text
-Title | Email | Online | Grand Total
-```
-
----
-
-## Step 1: Confirm the relationship
-
-In **Model view**, make sure this exists:
-
-```text
-cib_tbl_dim_doc[DocID] → cib_tbl_readership[DocID]
-```
-
-Cardinality:
-
-```text
-One to many
-```
-
-Cross-filter direction:
-
-```text
-Single
-```
-
----
-
-## Step 2: Create the measures
-
-Go to **Report view** or **Model view** → select `cib_tbl_readership` → **New measure**.
-
-Create these measures:
-
-### Total Reads
+### 1. Total Reads
 
 ```DAX
 Total Reads =
 COUNTROWS(cib_tbl_readership)
 ```
 
-### Email Reads
+### 2. Max Read Date in Data
 
 ```DAX
-Email Reads =
+Max Read Date =
+CALCULATE(
+    MAX(cib_tbl_readership[ReadDateTime]),
+    ALL(cib_tbl_readership)
+)
+```
+
+### 3. Reads Last 7 Days based on data
+
+```DAX
+Reads Last 7 Days =
+VAR MaxDate =
+    CALCULATE(
+        MAX(cib_tbl_readership[ReadDateTime]),
+        ALL(cib_tbl_readership)
+    )
+RETURN
 CALCULATE(
     [Total Reads],
+    cib_tbl_readership[ReadDateTime] >= MaxDate - 7,
+    cib_tbl_readership[ReadDateTime] <= MaxDate
+)
+```
+
+### 4. Email Reads Last 7 Days
+
+```DAX
+Email Reads Last 7 Days =
+VAR MaxDate =
+    CALCULATE(
+        MAX(cib_tbl_readership[ReadDateTime]),
+        ALL(cib_tbl_readership)
+    )
+RETURN
+CALCULATE(
+    [Total Reads],
+    cib_tbl_readership[ReadDateTime] >= MaxDate - 7,
+    cib_tbl_readership[ReadDateTime] <= MaxDate,
     cib_tbl_readership[Channel] = "Email"
 )
 ```
 
-### Online Reads
+### 5. Online Reads Last 7 Days
 
 ```DAX
-Online Reads =
+Online Reads Last 7 Days =
+VAR MaxDate =
+    CALCULATE(
+        MAX(cib_tbl_readership[ReadDateTime]),
+        ALL(cib_tbl_readership)
+    )
+RETURN
 CALCULATE(
     [Total Reads],
+    cib_tbl_readership[ReadDateTime] >= MaxDate - 7,
+    cib_tbl_readership[ReadDateTime] <= MaxDate,
     cib_tbl_readership[Channel] = "Online"
 )
 ```
 
-### Reads Last 7 Days
-
-```DAX
-Reads Last 7 Days =
-CALCULATE(
-    [Total Reads],
-    cib_tbl_readership[ReadDateTime] >= TODAY() - 7
-)
-```
-
-### Email Reads Last 7 Days
-
-```DAX
-Email Reads Last 7 Days =
-CALCULATE(
-    [Email Reads],
-    cib_tbl_readership[ReadDateTime] >= TODAY() - 7
-)
-```
-
-### Online Reads Last 7 Days
-
-```DAX
-Online Reads Last 7 Days =
-CALCULATE(
-    [Online Reads],
-    cib_tbl_readership[ReadDateTime] >= TODAY() - 7
-)
-```
-
-### Reads Last 30 Days
+## Also create Last 30 Days versions
 
 ```DAX
 Reads Last 30 Days =
+VAR MaxDate =
+    CALCULATE(
+        MAX(cib_tbl_readership[ReadDateTime]),
+        ALL(cib_tbl_readership)
+    )
+RETURN
 CALCULATE(
     [Total Reads],
-    cib_tbl_readership[ReadDateTime] >= TODAY() - 30
+    cib_tbl_readership[ReadDateTime] >= MaxDate - 30,
+    cib_tbl_readership[ReadDateTime] <= MaxDate
 )
 ```
-
-### Email Reads Last 30 Days
 
 ```DAX
 Email Reads Last 30 Days =
+VAR MaxDate =
+    CALCULATE(
+        MAX(cib_tbl_readership[ReadDateTime]),
+        ALL(cib_tbl_readership)
+    )
+RETURN
 CALCULATE(
-    [Email Reads],
-    cib_tbl_readership[ReadDateTime] >= TODAY() - 30
+    [Total Reads],
+    cib_tbl_readership[ReadDateTime] >= MaxDate - 30,
+    cib_tbl_readership[ReadDateTime] <= MaxDate,
+    cib_tbl_readership[Channel] = "Email"
 )
 ```
-
-### Online Reads Last 30 Days
 
 ```DAX
 Online Reads Last 30 Days =
+VAR MaxDate =
+    CALCULATE(
+        MAX(cib_tbl_readership[ReadDateTime]),
+        ALL(cib_tbl_readership)
+    )
+RETURN
 CALCULATE(
-    [Online Reads],
-    cib_tbl_readership[ReadDateTime] >= TODAY() - 30
+    [Total Reads],
+    cib_tbl_readership[ReadDateTime] >= MaxDate - 30,
+    cib_tbl_readership[ReadDateTime] <= MaxDate,
+    cib_tbl_readership[Channel] = "Online"
 )
 ```
 
----
+## Then refresh the visual
 
-## Step 3: Build “Top Documents - Last 7 Days”
-
-Insert a **Table visual**.
-
-Add these fields:
+For the table visual, use:
 
 ```text
 cib_tbl_dim_doc[Title]
@@ -158,163 +142,27 @@ Online Reads Last 7 Days
 Reads Last 7 Days
 ```
 
-Rename the columns in the visual:
+Do **not** use `Title` from `cib_tbl_readership`. It should come from:
 
 ```text
-Email Reads Last 7 Days  → Email
-Online Reads Last 7 Days → Online
-Reads Last 7 Days        → Grand Total
+cib_tbl_dim_doc[Title]
 ```
 
-Then sort by:
+## Quick check
 
-```text
-Grand Total descending
-```
-
-To make it top documents only:
-
-1. Select the table visual.
-    
-2. Go to **Filters on this visual**.
-    
-3. Add `Title`.
-    
-4. Change filter type to **Top N**.
-    
-5. Enter something like `25`.
-    
-6. Use **Reads Last 7 Days** as the “By value”.
-    
-7. Apply filter.
-    
-
-Title the visual:
-
-```text
-Top Documents - Last 7 Days
-```
-
----
-
-## Step 4: Build “Top Documents - Last 30 Days”
-
-Copy the first table visual and paste it to the right.
-
-Replace the measures with:
-
-```text
-Email Reads Last 30 Days
-Online Reads Last 30 Days
-Reads Last 30 Days
-```
-
-Rename them visually as:
-
-```text
-Email
-Online
-Grand Total
-```
-
-Sort by:
-
-```text
-Grand Total descending
-```
-
-Apply Top N using:
-
-```text
-Reads Last 30 Days
-```
-
-Title the visual:
-
-```text
-Top Documents - Last 30 Days
-```
-
----
-
-## Step 5: Add the header image / title area
-
-For the top-left TD Strategy Weekly Update style section:
-
-In Power BI Desktop:
-
-```text
-Insert → Image
-```
-
-Add the TD image/logo if you have it.
-
-Then add a text box:
-
-```text
-TD Strategy Weekly Update
-```
-
-Use:
-
-```text
-Insert → Text box
-```
-
-For a quick version, create a simple title:
-
-```text
-TD Strategy Weekly Update
-```
-
-Then place the two table visuals below it.
-
----
-
-## Step 6: Validate the numbers
-
-Before styling, validate with a simple table:
+Before using the Last 7 Days measures, test with only:
 
 ```text
 Title
-Channel
 Total Reads
 ```
 
-Make sure Email and Online counts are splitting correctly.
+If that shows data, your relationship is fine and the issue was only the date filter.
 
-Also check actual channel values in Power BI. Sometimes the values may be:
+If even `Title + Total Reads` is blank, then the issue is likely:
 
 ```text
-email
-Email
-EMAIL
-Online
-Web
+cib_tbl_dim_doc[DocID] values do not match cib_tbl_readership[DocID]
 ```
 
-If the channel values are not exactly `Email` and `Online`, adjust the DAX.
-
-For example, safer version:
-
-```DAX
-Email Reads =
-CALCULATE(
-    [Total Reads],
-    LOWER(cib_tbl_readership[Channel]) = "email"
-)
-```
-
-```DAX
-Online Reads =
-CALCULATE(
-    [Total Reads],
-    LOWER(cib_tbl_readership[Channel]) = "online"
-)
-```
-
----
-
-## Description you can use in Jira/Confluence
-
-> Created an initial Power BI dashboard page using `cib_tbl_dim_doc` and `cib_tbl_readership`. The page recreates the first Strategy-style view with top documents for the last 7 days and last 30 days. The visuals use `DocID` to join document metadata with readership activity and calculate Email, Online, and Grand Total readership counts by document title.
+In that case, check the `DocID` values in both tables.
