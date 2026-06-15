@@ -1,91 +1,93 @@
-You do not see data because the measures are probably filtering on:
+Yes, you can create this as a **second dashboard page** using your existing Power BI semantic model. This view needs more than the first two-table view because it uses **reader, account, document title, and channel counts**.
 
-```DAX
-TODAY() - 7
+## Tables needed
+
+For this page, use these tables:
+
+```text
+cib_tbl_readership
+cib_tbl_dim_doc
+cib_tbl_dim_reader
+cib_tbl_bmcontacts
 ```
 
-But your sample data may not have records in the **actual last 7 days from today**. So Power BI returns blank.
+Relationships needed:
 
-For testing, use the **latest date available in your data** instead of `TODAY()`.
+```text
+cib_tbl_dim_doc[DocID]       1 → * cib_tbl_readership[DocID]
+cib_tbl_dim_reader[ReaderID] 1 → * cib_tbl_readership[ReaderID]
+cib_tbl_dim_reader[ReaderID] 1 → * cib_tbl_bmcontacts[ReaderID]
+```
 
-## Fix the DAX measures
+The page in your screenshot has three main areas:
 
-Create/replace these measures in `cib_tbl_readership`.
+```text
+1. Top Readers table
+2. Top 10 Trade Ideas bar chart
+3. Top 10 Market Musing bar chart
+```
 
-### 1. Total Reads
+---
+
+# 1. Create the channel measures
+
+Since your actual channel values are:
+
+```text
+Bloomberg
+Email (Click)
+Email (Open)
+```
+
+Create these measures in `cib_tbl_readership`.
+
+### Bloomberg Reads
+
+```DAX
+Bloomberg Reads =
+CALCULATE(
+    [Total Reads],
+    cib_tbl_readership[Channel] = "Bloomberg"
+)
+```
+
+### Email Link Reads
+
+```DAX
+Email Link Reads =
+CALCULATE(
+    [Total Reads],
+    cib_tbl_readership[Channel] = "Email (Click)"
+)
+```
+
+### Email Open Reads
+
+```DAX
+Email Open Reads =
+CALCULATE(
+    [Total Reads],
+    cib_tbl_readership[Channel] = "Email (Open)"
+)
+```
+
+### Total Reads
 
 ```DAX
 Total Reads =
 COUNTROWS(cib_tbl_readership)
 ```
 
-### 2. Max Read Date in Data
+---
+
+# 2. Create Last 30 Days versions
+
+For this dashboard, use last 30 days based on the **latest date in your sample data**, not today.
+
+### Total Reads Last 30 Days
 
 ```DAX
-Max Read Date =
-CALCULATE(
-    MAX(cib_tbl_readership[ReadDateTime]),
-    ALL(cib_tbl_readership)
-)
-```
-
-### 3. Reads Last 7 Days based on data
-
-```DAX
-Reads Last 7 Days =
-VAR MaxDate =
-    CALCULATE(
-        MAX(cib_tbl_readership[ReadDateTime]),
-        ALL(cib_tbl_readership)
-    )
-RETURN
-CALCULATE(
-    [Total Reads],
-    cib_tbl_readership[ReadDateTime] >= MaxDate - 7,
-    cib_tbl_readership[ReadDateTime] <= MaxDate
-)
-```
-
-### 4. Email Reads Last 7 Days
-
-```DAX
-Email Reads Last 7 Days =
-VAR MaxDate =
-    CALCULATE(
-        MAX(cib_tbl_readership[ReadDateTime]),
-        ALL(cib_tbl_readership)
-    )
-RETURN
-CALCULATE(
-    [Total Reads],
-    cib_tbl_readership[ReadDateTime] >= MaxDate - 7,
-    cib_tbl_readership[ReadDateTime] <= MaxDate,
-    cib_tbl_readership[Channel] = "Email"
-)
-```
-
-### 5. Online Reads Last 7 Days
-
-```DAX
-Online Reads Last 7 Days =
-VAR MaxDate =
-    CALCULATE(
-        MAX(cib_tbl_readership[ReadDateTime]),
-        ALL(cib_tbl_readership)
-    )
-RETURN
-CALCULATE(
-    [Total Reads],
-    cib_tbl_readership[ReadDateTime] >= MaxDate - 7,
-    cib_tbl_readership[ReadDateTime] <= MaxDate,
-    cib_tbl_readership[Channel] = "Online"
-)
-```
-
-## Also create Last 30 Days versions
-
-```DAX
-Reads Last 30 Days =
+Total Reads Last 30 Days =
 VAR MaxDate =
     CALCULATE(
         MAX(cib_tbl_readership[ReadDateTime]),
@@ -99,8 +101,10 @@ CALCULATE(
 )
 ```
 
+### Bloomberg Reads Last 30 Days
+
 ```DAX
-Email Reads Last 30 Days =
+Bloomberg Reads Last 30 Days =
 VAR MaxDate =
     CALCULATE(
         MAX(cib_tbl_readership[ReadDateTime]),
@@ -111,12 +115,14 @@ CALCULATE(
     [Total Reads],
     cib_tbl_readership[ReadDateTime] >= MaxDate - 30,
     cib_tbl_readership[ReadDateTime] <= MaxDate,
-    cib_tbl_readership[Channel] = "Email"
+    cib_tbl_readership[Channel] = "Bloomberg"
 )
 ```
 
+### Email Link Reads Last 30 Days
+
 ```DAX
-Online Reads Last 30 Days =
+Email Link Reads Last 30 Days =
 VAR MaxDate =
     CALCULATE(
         MAX(cib_tbl_readership[ReadDateTime]),
@@ -127,42 +133,228 @@ CALCULATE(
     [Total Reads],
     cib_tbl_readership[ReadDateTime] >= MaxDate - 30,
     cib_tbl_readership[ReadDateTime] <= MaxDate,
-    cib_tbl_readership[Channel] = "Online"
+    cib_tbl_readership[Channel] = "Email (Click)"
 )
 ```
 
-## Then refresh the visual
+### Email Open Reads Last 30 Days
 
-For the table visual, use:
-
-```text
-cib_tbl_dim_doc[Title]
-Email Reads Last 7 Days
-Online Reads Last 7 Days
-Reads Last 7 Days
+```DAX
+Email Open Reads Last 30 Days =
+VAR MaxDate =
+    CALCULATE(
+        MAX(cib_tbl_readership[ReadDateTime]),
+        ALL(cib_tbl_readership)
+    )
+RETURN
+CALCULATE(
+    [Total Reads],
+    cib_tbl_readership[ReadDateTime] >= MaxDate - 30,
+    cib_tbl_readership[ReadDateTime] <= MaxDate,
+    cib_tbl_readership[Channel] = "Email (Open)"
+)
 ```
 
-Do **not** use `Title` from `cib_tbl_readership`. It should come from:
+---
+
+# 3. Build the “Top Readers” table
+
+Insert a **Table visual** on the left side.
+
+Add these fields:
 
 ```text
+cib_tbl_bmcontacts[Account]
+cib_tbl_dim_reader[ReaderName]
 cib_tbl_dim_doc[Title]
+Bloomberg Reads Last 30 Days
+Email Link Reads Last 30 Days
+Email Open Reads Last 30 Days
 ```
 
-## Quick check
-
-Before using the Last 7 Days measures, test with only:
+Rename the column headers for this visual:
 
 ```text
+Account
+Reader Name
 Title
+Bloomberg Library
+Email (Link)
+Email (Open)
+```
+
+Then sort by:
+
+```text
+Email Open Reads Last 30 Days descending
+```
+
+or by:
+
+```text
+Total Reads Last 30 Days descending
+```
+
+To make it look like the screenshot, apply a **Top N filter**:
+
+1. Select the table visual.
+    
+2. Go to **Filters on this visual**.
+    
+3. Add `ReaderName` or `Title`.
+    
+4. Change filter type to **Top N**.
+    
+5. Enter `25` or `50`.
+    
+6. Use `Total Reads Last 30 Days` as the value.
+    
+7. Click **Apply filter**.
+    
+
+---
+
+# 4. Build “Top 10 Trade Ideas”
+
+Use a **Stacked bar chart**.
+
+Fields:
+
+```text
+Y-axis: cib_tbl_dim_doc[Title]
+X-axis: Total Reads Last 30 Days
+Legend: cib_tbl_readership[Channel]
+```
+
+Then filter it to only Trade Ideas documents.
+
+Use whichever field identifies trade ideas in your data. Most likely one of these:
+
+```text
+cib_tbl_dim_doc[DocumentType]
+cib_tbl_dim_doc[Contribute_Group]
+```
+
+For example:
+
+```text
+DocumentType = Trade Ideas
+```
+
+or:
+
+```text
+Contribute_Group = Trade Ideas
+```
+
+Then apply **Top N = 10** by `Total Reads Last 30 Days`.
+
+Title:
+
+```text
+Top 10 Trade Ideas
+```
+
+---
+
+# 5. Build “Top 10 Market Musing”
+
+Copy the Trade Ideas chart and change the filter.
+
+For example:
+
+```text
+DocumentType = Market Musing
+```
+
+or:
+
+```text
+Contribute_Group = Market Musing
+```
+
+Apply:
+
+```text
+Top N = 10 by Total Reads Last 30 Days
+```
+
+Title:
+
+```text
+Top 10 Market Musing
+```
+
+---
+
+# 6. Add the green dashboard header
+
+At the top:
+
+1. Go to **Insert → Shape → Rectangle**.
+    
+2. Put it across the top of the page.
+    
+3. Set fill color to green.
+    
+4. Add a text box:
+    
+
+```text
+Research Sales Opportunities
+```
+
+5. Add smaller text below:
+    
+
+```text
+Welcome Sukumar, Uma
+```
+
+You can replace the name with your test user name.
+
+---
+
+# 7. Add slicers on the right side
+
+The screenshot has filters on the right. You can add slicers for:
+
+```text
+Region
+Strategist
+Account
+DocumentType
+Contribute_Group
+Date
+Channel
+```
+
+Good starting slicers:
+
+```text
+cib_tbl_dim_doc[DocumentType]
+cib_tbl_readership[Channel]
+cib_tbl_bmcontacts[Account]
+cib_tbl_bmcontacts[Region]
+cib_tbl_dim_doc[PublishDate]
+```
+
+---
+
+# Most important validation
+
+Before styling, make sure this table works:
+
+```text
+Account
+ReaderName
+Title
+Channel
 Total Reads
 ```
 
-If that shows data, your relationship is fine and the issue was only the date filter.
+If this returns rows correctly, your relationships are working and the dashboard can be built.
 
-If even `Title + Total Reads` is blank, then the issue is likely:
+For your Jira/Confluence description, you can say:
 
-```text
-cib_tbl_dim_doc[DocID] values do not match cib_tbl_readership[DocID]
-```
-
-In that case, check the `DocID` values in both tables.
+> Created a second Power BI dashboard page similar to the Research Sales Opportunities view. This page uses the semantic model relationships between readership, document, reader, and contact tables to show top readers, top trade ideas, and top market musing documents by channel-level readership activity.
