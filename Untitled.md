@@ -1,37 +1,162 @@
-Yes, you can create this as a **second dashboard page** using your existing Power BI semantic model. This view needs more than the first two-table view because it uses **reader, account, document title, and channel counts**.
+Yes — this is the **right-side filter / summary panel**. You can build it in Power BI using **cards, slicers, and one table/matrix visual**.
 
-## Tables needed
+## 1. Create “Last Updated” measure
 
-For this page, use these tables:
+Create a new measure in `cib_tbl_readership`:
 
-```text
-cib_tbl_readership
-cib_tbl_dim_doc
-cib_tbl_dim_reader
-cib_tbl_bmcontacts
+```DAX
+Last Updated =
+"Last Updated  " &
+FORMAT(
+    MAX(cib_tbl_readership[DataUploadDatetime]),
+    "M/D/YYYY h:mm AM/PM"
+)
 ```
 
-Relationships needed:
+Then add a **Card** visual and place this measure in it.
 
-```text
-cib_tbl_dim_doc[DocID]       1 → * cib_tbl_readership[DocID]
-cib_tbl_dim_reader[ReaderID] 1 → * cib_tbl_readership[ReaderID]
-cib_tbl_dim_reader[ReaderID] 1 → * cib_tbl_bmcontacts[ReaderID]
+---
+
+## 2. Create “TOTAL HITS” measure
+
+Use your existing total reads/hits measure, or create:
+
+```DAX
+Total Hits =
+COUNTROWS(cib_tbl_readership)
 ```
 
-The page in your screenshot has three main areas:
+Then create another measure for display:
+
+```DAX
+Total Hits Display =
+"TOTAL HITS: " & FORMAT([Total Hits], "#,##0")
+```
+
+Add this to a **Card** visual.
+
+---
+
+## 3. Read Date Time dropdown filter
+
+Add a **Slicer** visual.
+
+Use:
 
 ```text
-1. Top Readers table
-2. Top 10 Trade Ideas bar chart
-3. Top 10 Market Musing bar chart
+cib_tbl_readership[ReadDateTime]
+```
+
+Then in slicer settings, change it to dropdown.
+
+But to get options like:
+
+```text
+Last 3 days
+Last 7 days
+Last 30 days
+```
+
+you need a disconnected table.
+
+Go to **Modeling → New table**:
+
+```DAX
+Date Range Filter =
+DATATABLE(
+    "Range", STRING,
+    {
+        {"Last 3 days"},
+        {"Last 7 days"},
+        {"Last 30 days"},
+        {"All"}
+    }
+)
+```
+
+Put `Date Range Filter[Range]` in a slicer.
+
+For now, since you already have Last 30 Days measures, you can keep it simple and manually create separate measures later.
+
+---
+
+## 4. Search by Contact Owner
+
+Add a **Slicer** visual using:
+
+```text
+cib_tbl_bmcontacts[ContactOwner]
+```
+
+Then set slicer style to:
+
+```text
+Dropdown
+```
+
+or:
+
+```text
+Text search enabled
+```
+
+In the slicer, click the three dots `...` and turn on **Search**.
+
+Title it:
+
+```text
+Search by Contact Owner
 ```
 
 ---
 
-# 1. Create the channel measures
+## 5. Search by Account Name
 
-Since your actual channel values are:
+Add another **Slicer** visual using:
+
+```text
+cib_tbl_bmcontacts[Account]
+```
+
+Turn on **Search**.
+
+Title it:
+
+```text
+Search by Account Name
+```
+
+---
+
+## 6. Filter by Document Type
+
+Add a **Slicer** visual using:
+
+```text
+cib_tbl_dim_doc[DocumentType]
+```
+
+Set it as dropdown.
+
+Title:
+
+```text
+Filter By Document Type
+```
+
+---
+
+## 7. Filter by Channel
+
+Add a slicer using:
+
+```text
+cib_tbl_readership[Channel]
+```
+
+Set the slicer to list style.
+
+It should show your values:
 
 ```text
 Bloomberg
@@ -39,322 +164,132 @@ Email (Click)
 Email (Open)
 ```
 
-Create these measures in `cib_tbl_readership`.
+If you want the names to match the screenshot, you can just leave them as your actual channel values.
 
-### Bloomberg Reads
+Title:
 
-```DAX
-Bloomberg Reads =
-CALCULATE(
-    [Total Reads],
-    cib_tbl_readership[Channel] = "Bloomberg"
-)
-```
-
-### Email Link Reads
-
-```DAX
-Email Link Reads =
-CALCULATE(
-    [Total Reads],
-    cib_tbl_readership[Channel] = "Email (Click)"
-)
-```
-
-### Email Open Reads
-
-```DAX
-Email Open Reads =
-CALCULATE(
-    [Total Reads],
-    cib_tbl_readership[Channel] = "Email (Open)"
-)
-```
-
-### Total Reads
-
-```DAX
-Total Reads =
-COUNTROWS(cib_tbl_readership)
+```text
+Filter by Channel
 ```
 
 ---
 
-# 2. Create Last 30 Days versions
+## 8. Filter by Region
 
-For this dashboard, use last 30 days based on the **latest date in your sample data**, not today.
+Add a slicer using whichever region field you want.
 
-### Total Reads Last 30 Days
+Most likely:
 
-```DAX
-Total Reads Last 30 Days =
-VAR MaxDate =
-    CALCULATE(
-        MAX(cib_tbl_readership[ReadDateTime]),
-        ALL(cib_tbl_readership)
-    )
-RETURN
-CALCULATE(
-    [Total Reads],
-    cib_tbl_readership[ReadDateTime] >= MaxDate - 30,
-    cib_tbl_readership[ReadDateTime] <= MaxDate
-)
+```text
+cib_tbl_bmcontacts[Region]
 ```
 
-### Bloomberg Reads Last 30 Days
+or:
 
-```DAX
-Bloomberg Reads Last 30 Days =
-VAR MaxDate =
-    CALCULATE(
-        MAX(cib_tbl_readership[ReadDateTime]),
-        ALL(cib_tbl_readership)
-    )
-RETURN
-CALCULATE(
-    [Total Reads],
-    cib_tbl_readership[ReadDateTime] >= MaxDate - 30,
-    cib_tbl_readership[ReadDateTime] <= MaxDate,
-    cib_tbl_readership[Channel] = "Bloomberg"
-)
+```text
+cib_lookup_countrytoregion[Region]
 ```
 
-### Email Link Reads Last 30 Days
+For this screenshot, because it is sales/contact focused, I would use:
 
-```DAX
-Email Link Reads Last 30 Days =
-VAR MaxDate =
-    CALCULATE(
-        MAX(cib_tbl_readership[ReadDateTime]),
-        ALL(cib_tbl_readership)
-    )
-RETURN
-CALCULATE(
-    [Total Reads],
-    cib_tbl_readership[ReadDateTime] >= MaxDate - 30,
-    cib_tbl_readership[ReadDateTime] <= MaxDate,
-    cib_tbl_readership[Channel] = "Email (Click)"
-)
+```text
+cib_tbl_bmcontacts[Region]
 ```
 
-### Email Open Reads Last 30 Days
+Title:
 
-```DAX
-Email Open Reads Last 30 Days =
-VAR MaxDate =
-    CALCULATE(
-        MAX(cib_tbl_readership[ReadDateTime]),
-        ALL(cib_tbl_readership)
-    )
-RETURN
-CALCULATE(
-    [Total Reads],
-    cib_tbl_readership[ReadDateTime] >= MaxDate - 30,
-    cib_tbl_readership[ReadDateTime] <= MaxDate,
-    cib_tbl_readership[Channel] = "Email (Open)"
-)
+```text
+Filter by Region
 ```
 
 ---
 
-# 3. Build the “Top Readers” table
+## 9. Create “Document Types” table
 
-Insert a **Table visual** on the left side.
+Use a **Matrix visual**, not a normal table, because your screenshot groups document types.
 
 Add these fields:
 
-```text
-cib_tbl_bmcontacts[Account]
-cib_tbl_dim_reader[ReaderName]
-cib_tbl_dim_doc[Title]
-Bloomberg Reads Last 30 Days
-Email Link Reads Last 30 Days
-Email Open Reads Last 30 Days
-```
-
-Rename the column headers for this visual:
+### Rows
 
 ```text
-Account
-Reader Name
-Title
-Bloomberg Library
-Email (Link)
-Email (Open)
-```
-
-Then sort by:
-
-```text
-Email Open Reads Last 30 Days descending
-```
-
-or by:
-
-```text
-Total Reads Last 30 Days descending
-```
-
-To make it look like the screenshot, apply a **Top N filter**:
-
-1. Select the table visual.
-    
-2. Go to **Filters on this visual**.
-    
-3. Add `ReaderName` or `Title`.
-    
-4. Change filter type to **Top N**.
-    
-5. Enter `25` or `50`.
-    
-6. Use `Total Reads Last 30 Days` as the value.
-    
-7. Click **Apply filter**.
-    
-
----
-
-# 4. Build “Top 10 Trade Ideas”
-
-Use a **Stacked bar chart**.
-
-Fields:
-
-```text
-Y-axis: cib_tbl_dim_doc[Title]
-X-axis: Total Reads Last 30 Days
-Legend: cib_tbl_readership[Channel]
-```
-
-Then filter it to only Trade Ideas documents.
-
-Use whichever field identifies trade ideas in your data. Most likely one of these:
-
-```text
-cib_tbl_dim_doc[DocumentType]
 cib_tbl_dim_doc[Contribute_Group]
-```
-
-For example:
-
-```text
-DocumentType = Trade Ideas
-```
-
-or:
-
-```text
-Contribute_Group = Trade Ideas
-```
-
-Then apply **Top N = 10** by `Total Reads Last 30 Days`.
-
-Title:
-
-```text
-Top 10 Trade Ideas
-```
-
----
-
-# 5. Build “Top 10 Market Musing”
-
-Copy the Trade Ideas chart and change the filter.
-
-For example:
-
-```text
-DocumentType = Market Musing
-```
-
-or:
-
-```text
-Contribute_Group = Market Musing
-```
-
-Apply:
-
-```text
-Top N = 10 by Total Reads Last 30 Days
-```
-
-Title:
-
-```text
-Top 10 Market Musing
-```
-
----
-
-# 6. Add the green dashboard header
-
-At the top:
-
-1. Go to **Insert → Shape → Rectangle**.
-    
-2. Put it across the top of the page.
-    
-3. Set fill color to green.
-    
-4. Add a text box:
-    
-
-```text
-Research Sales Opportunities
-```
-
-5. Add smaller text below:
-    
-
-```text
-Welcome Sukumar, Uma
-```
-
-You can replace the name with your test user name.
-
----
-
-# 7. Add slicers on the right side
-
-The screenshot has filters on the right. You can add slicers for:
-
-```text
-Region
-Strategist
-Account
-DocumentType
-Contribute_Group
-Date
-Channel
-```
-
-Good starting slicers:
-
-```text
 cib_tbl_dim_doc[DocumentType]
-cib_tbl_readership[Channel]
-cib_tbl_bmcontacts[Account]
-cib_tbl_bmcontacts[Region]
-cib_tbl_dim_doc[PublishDate]
+```
+
+### Values
+
+```text
+Total Hits
+```
+
+Rename the columns visually:
+
+```text
+Contribute_Group → Document Type (group)
+DocumentType     → Document Type
+Total Hits       → Total Count
+```
+
+Title the visual:
+
+```text
+Document Types
 ```
 
 ---
 
-# Most important validation
+## 10. Make it look like the screenshot
 
-Before styling, make sure this table works:
+For the right panel:
+
+1. Insert a rectangle shape.
+    
+2. Make it light gray or white.
+    
+3. Place all slicers/cards on top of it.
+    
+4. Add green title text where needed.
+    
+5. Use small font sizes.
+    
+
+Recommended order:
 
 ```text
-Account
-ReaderName
-Title
-Channel
-Total Reads
+Last Updated
+TOTAL HITS
+Read Date Time
+Search by Contact Owner
+Search by Account Name
+Filter By Document Type
+Filter by Channel
+Filter by Region
+Document Types matrix
 ```
 
-If this returns rows correctly, your relationships are working and the dashboard can be built.
+---
 
-For your Jira/Confluence description, you can say:
+## Important relationship check
 
-> Created a second Power BI dashboard page similar to the Research Sales Opportunities view. This page uses the semantic model relationships between readership, document, reader, and contact tables to show top readers, top trade ideas, and top market musing documents by channel-level readership activity.
+For these filters to affect the charts/table, these relationships need to be active:
+
+```text
+cib_tbl_dim_doc[DocID] → cib_tbl_readership[DocID]
+cib_tbl_dim_reader[ReaderID] → cib_tbl_readership[ReaderID]
+cib_tbl_dim_reader[ReaderID] → cib_tbl_bmcontacts[ReaderID]
+```
+
+For account and contact owner filters, the important path is:
+
+```text
+BMContacts → Dim_Reader → Readership
+```
+
+If slicers do not affect the charts, then the cross-filter direction may need to be checked. For testing, you can use **Both** between:
+
+```text
+cib_tbl_dim_reader and cib_tbl_bmcontacts
+```
+
+But normally keep the model clean with single direction unless needed.
