@@ -1,183 +1,137 @@
-Yes — for this layout, you should use a **Matrix visual**, not a normal table.
+That dropdown is not changing anything because your **Range slicer is from a disconnected table**. It will only affect visuals if the measures are written to read the selected range.
 
-The original is grouped like this:
-
-```text
-Contact Owner
-  → Account
-     → Reader Name
-        → Title
-```
-
-That is why the same Contact Owner / Account is shown once and then the titles are listed underneath. A normal table will repeat every value on every row.
-
-## Build it like the original
-
-### 1. Replace the current Top Readers table with Matrix
-
-Select your current Top Readers visual, then click **Matrix** in Visualizations.
-
-### 2. Put these fields in Rows, in this exact order
-
-```text
-Rows:
-cib_tbl_bmcontacts[ContactOwner]
-cib_tbl_bmcontacts[Account]
-cib_tbl_dim_reader[ReaderName]
-cib_tbl_dim_doc[Title]
-```
-
-Important: use `Account` from:
-
-```text
-cib_tbl_bmcontacts[Account]
-```
-
-not from the lookup account table.
-
-### 3. Put these metrics in Values
-
-```text
-Values:
-Bloomberg Library
-Email Link
-Email Open
-```
-
-or your current measures:
-
-```text
-Bloomberg Reads Last 30 Days
-Email Link Reads Last 30 Days
-Email Open Reads Last 30 Days
-```
-
-Rename them for the visual:
-
-```text
-Bloomberg Reads Last 30 Days → Bloomberg Library
-Email Link Reads Last 30 Days → Email (Link)
-Email Open Reads Last 30 Days → Email (Open)
-```
-
----
-
-## Make it display like the screenshot
-
-### Turn off stepped layout
-
-This is the key setting.
-
-1. Select the Matrix.
-    
-2. Go to **Format visual**.
-    
-3. Open **Row headers**.
-    
-4. Turn **Stepped layout** to:
-    
-
-```text
-Off
-```
-
-Now it will show separate columns:
-
-```text
-Contact Owner | Account | Reader Name | Title
-```
-
-instead of one indented hierarchy column.
-
-### Expand all hierarchy levels
-
-On the matrix visual, use the drill/expand icons at the top of the visual.
-
-Click:
-
-```text
-Expand all down one level in the hierarchy
-```
-
-Keep clicking until it expands to:
-
-```text
-Contact Owner → Account → Reader Name → Title
-```
-
-This will make it look like the original screenshot.
-
----
-
-## Fix repeating issue
-
-If you still see the same reader/title repeated across many accounts, check this:
-
-Use these fields only:
-
-```text
-ContactOwner from cib_tbl_bmcontacts
-Account from cib_tbl_bmcontacts
-ReaderName from cib_tbl_dim_reader
-Title from cib_tbl_dim_doc
-```
-
-Do not use:
-
-```text
-cib_lookup_accountpropername_clienttype[AccountProperName]
-```
-
-inside this visual.
-
----
-
-## Optional: hide empty rows
-
-In the Matrix filters, add your combined ranking measure, for example:
-
-```text
-Reader Activity Total
-```
-
-Set filter:
-
-```text
-is greater than 0
-```
-
-If you do not have it, create:
+Right now, your visuals are probably still using fixed measures like:
 
 ```DAX
-Reader Activity Total =
-[Bloomberg Reads Last 30 Days]
-+ [Email Link Reads Last 30 Days]
-+ [Email Open Reads Last 30 Days]
+Email_Open Last 30 Days
+Online Last 30 Days
+Grand Total Last 30 Days
 ```
 
-Then apply visual filter:
+Those measures do **not** care what you select in the Range slicer.
 
-```text
-Reader Activity Total > 0
+## Fix: create dynamic measures
+
+### 1. Selected Days measure
+
+Create this measure:
+
+```DAX
+Selected Range Days =
+SWITCH(
+    SELECTEDVALUE('Date Range Filter'[Range], "All"),
+    "Last 3 days", 3,
+    "Last 7 days", 7,
+    "Last 30 days", 30,
+    "All", 99999,
+    99999
+)
 ```
 
-That will remove rows where there was no activity.
+---
 
-Final structure should be:
+### 2. Dynamic Email Open
+
+```DAX
+Email_Open Dynamic =
+VAR MaxDate =
+    CALCULATE(
+        MAX(cib_tbl_readership[ReadDateTime]),
+        ALL(cib_tbl_readership)
+    )
+VAR DaysBack = [Selected Range Days]
+RETURN
+CALCULATE(
+    COUNTROWS(cib_tbl_readership),
+    cib_tbl_readership[ReadDateTime] >= MaxDate - DaysBack,
+    cib_tbl_readership[ReadDateTime] <= MaxDate,
+    cib_tbl_readership[Channel] = "Email (Open)"
+)
+```
+
+---
+
+### 3. Dynamic Online
+
+```DAX
+Online Dynamic =
+VAR MaxDate =
+    CALCULATE(
+        MAX(cib_tbl_readership[ReadDateTime]),
+        ALL(cib_tbl_readership)
+    )
+VAR DaysBack = [Selected Range Days]
+RETURN
+CALCULATE(
+    COUNTROWS(cib_tbl_readership),
+    cib_tbl_readership[ReadDateTime] >= MaxDate - DaysBack,
+    cib_tbl_readership[ReadDateTime] <= MaxDate,
+    cib_tbl_readership[Channel] = "Bloomberg"
+)
+```
+
+---
+
+### 4. Dynamic Grand Total
+
+```DAX
+Grand Total Dynamic =
+[Email_Open Dynamic] + [Online Dynamic]
+```
+
+---
+
+### 5. Dynamic Total Hits Display
+
+```DAX
+Total Hits Dynamic Display =
+"TOTAL HITS: " & FORMAT([Grand Total Dynamic], "#,##0")
+```
+
+Use this in the top card instead of your old `Total Hits Display`.
+
+---
+
+## Then update the visuals
+
+For the Top Documents table, remove the fixed measures and use:
 
 ```text
-Matrix
-
-Rows:
-ContactOwner
-Account
-ReaderName
 Title
-
-Values:
-Bloomberg Library
-Email (Link)
-Email (Open)
+Email_Open Dynamic
+Online Dynamic
+Grand Total Dynamic
 ```
 
-This will give you the grouped “Top Readers” layout like the original.
+Rename them for the visual as:
+
+```text
+Email_Open
+Online
+Grand_Total
+```
+
+For the card, use:
+
+```text
+Total Hits Dynamic Display
+```
+
+## Also change slicer setting
+
+Your Range slicer has multiple checkboxes. Better set it to single select:
+
+1. Select the Range slicer.
+    
+2. Format visual.
+    
+3. Slicer settings → Selection.
+    
+4. Turn **Single select = On**.
+    
+5. Turn **Show “Select all” = Off**.
+    
+
+Then selecting `Last 7 days` or `Last 30 days` should actually change the table and card.
+
+The key point: the slicer is working, but your current measures are not listening to it.
