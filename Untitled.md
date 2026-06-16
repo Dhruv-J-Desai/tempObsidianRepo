@@ -1,137 +1,123 @@
-That dropdown is not changing anything because your **Range slicer is from a disconnected table**. It will only affect visuals if the measures are written to read the selected range.
-
-Right now, your visuals are probably still using fixed measures like:
+The **Channel slicer is not affecting Top Readers** because your Top Readers table is using **separate hardcoded channel measures** like:
 
 ```DAX
-Email_Open Last 30 Days
-Online Last 30 Days
-Grand Total Last 30 Days
-```
-
-Those measures do **not** care what you select in the Range slicer.
-
-## Fix: create dynamic measures
-
-### 1. Selected Days measure
-
-Create this measure:
-
-```DAX
-Selected Range Days =
-SWITCH(
-    SELECTEDVALUE('Date Range Filter'[Range], "All"),
-    "Last 3 days", 3,
-    "Last 7 days", 7,
-    "Last 30 days", 30,
-    "All", 99999,
-    99999
-)
-```
-
----
-
-### 2. Dynamic Email Open
-
-```DAX
-Email_Open Dynamic =
-VAR MaxDate =
-    CALCULATE(
-        MAX(cib_tbl_readership[ReadDateTime]),
-        ALL(cib_tbl_readership)
-    )
-VAR DaysBack = [Selected Range Days]
-RETURN
+Online Last 30 Days =
 CALCULATE(
     COUNTROWS(cib_tbl_readership),
-    cib_tbl_readership[ReadDateTime] >= MaxDate - DaysBack,
-    cib_tbl_readership[ReadDateTime] <= MaxDate,
-    cib_tbl_readership[Channel] = "Email (Open)"
-)
-```
-
----
-
-### 3. Dynamic Online
-
-```DAX
-Online Dynamic =
-VAR MaxDate =
-    CALCULATE(
-        MAX(cib_tbl_readership[ReadDateTime]),
-        ALL(cib_tbl_readership)
-    )
-VAR DaysBack = [Selected Range Days]
-RETURN
-CALCULATE(
-    COUNTROWS(cib_tbl_readership),
-    cib_tbl_readership[ReadDateTime] >= MaxDate - DaysBack,
-    cib_tbl_readership[ReadDateTime] <= MaxDate,
     cib_tbl_readership[Channel] = "Bloomberg"
 )
 ```
 
----
-
-### 4. Dynamic Grand Total
+and:
 
 ```DAX
-Grand Total Dynamic =
-[Email_Open Dynamic] + [Online Dynamic]
+Email Open Last 30 Days =
+CALCULATE(
+    COUNTROWS(cib_tbl_readership),
+    cib_tbl_readership[Channel] = "Email (Open)"
+)
 ```
 
----
+Those measures force their own channel filter, so the slicer selection can get ignored/overridden.
 
-### 5. Dynamic Total Hits Display
+## Fix option 1: Use `KEEPFILTERS`
+
+Update your channel measures like this.
+
+### Online Last 30 Days
 
 ```DAX
-Total Hits Dynamic Display =
-"TOTAL HITS: " & FORMAT([Grand Total Dynamic], "#,##0")
+Online Last 30 Days =
+VAR MaxDate =
+    CALCULATE(
+        MAX(cib_tbl_readership[ReadDateTime]),
+        ALL(cib_tbl_readership)
+    )
+RETURN
+CALCULATE(
+    COUNTROWS(cib_tbl_readership),
+    cib_tbl_readership[ReadDateTime] >= MaxDate - 30,
+    cib_tbl_readership[ReadDateTime] <= MaxDate,
+    KEEPFILTERS(cib_tbl_readership[Channel] = "Bloomberg")
+)
 ```
 
-Use this in the top card instead of your old `Total Hits Display`.
+### Email Click Last 30 Days
+
+```DAX
+Email Click Last 30 Days =
+VAR MaxDate =
+    CALCULATE(
+        MAX(cib_tbl_readership[ReadDateTime]),
+        ALL(cib_tbl_readership)
+    )
+RETURN
+CALCULATE(
+    COUNTROWS(cib_tbl_readership),
+    cib_tbl_readership[ReadDateTime] >= MaxDate - 30,
+    cib_tbl_readership[ReadDateTime] <= MaxDate,
+    KEEPFILTERS(cib_tbl_readership[Channel] = "Email (Click)")
+)
+```
+
+### Email Open Last 30 Days
+
+```DAX
+Email Open Last 30 Days =
+VAR MaxDate =
+    CALCULATE(
+        MAX(cib_tbl_readership[ReadDateTime]),
+        ALL(cib_tbl_readership)
+    )
+RETURN
+CALCULATE(
+    COUNTROWS(cib_tbl_readership),
+    cib_tbl_readership[ReadDateTime] >= MaxDate - 30,
+    cib_tbl_readership[ReadDateTime] <= MaxDate,
+    KEEPFILTERS(cib_tbl_readership[Channel] = "Email (Open)")
+)
+```
+
+`KEEPFILTERS` makes the measure respect the slicer instead of overriding it.
 
 ---
 
-## Then update the visuals
+## Fix option 2: Check Edit interactions
 
-For the Top Documents table, remove the fixed measures and use:
+Also confirm the slicer is allowed to filter Top Readers:
 
-```text
-Title
-Email_Open Dynamic
-Online Dynamic
-Grand Total Dynamic
+1. Click the **Filter by Channel** slicer.
+    
+2. Go to top ribbon **Format**.
+    
+3. Click **Edit interactions**.
+    
+4. On the **Top Readers** visual, make sure the **filter icon** is selected.
+    
+5. Turn off **Edit interactions**.
+    
+
+---
+
+## Add a visual filter to hide blank rows
+
+After using `KEEPFILTERS`, some rows may still appear blank. Create this measure:
+
+```DAX
+Reader Activity Total Last 30 Days =
+[Online Last 30 Days]
++ [Email Click Last 30 Days]
++ [Email Open Last 30 Days]
 ```
 
-Rename them for the visual as:
+Then add it to **Filters on this visual** for Top Readers:
 
 ```text
-Email_Open
-Online
-Grand_Total
+Reader Activity Total Last 30 Days is greater than 0
 ```
 
-For the card, use:
+That will remove rows that do not match the selected channel.
 
-```text
-Total Hits Dynamic Display
-```
+---
 
-## Also change slicer setting
-
-Your Range slicer has multiple checkboxes. Better set it to single select:
-
-1. Select the Range slicer.
-    
-2. Format visual.
-    
-3. Slicer settings → Selection.
-    
-4. Turn **Single select = On**.
-    
-5. Turn **Show “Select all” = Off**.
-    
-
-Then selecting `Last 7 days` or `Last 30 days` should actually change the table and card.
-
-The key point: the slicer is working, but your current measures are not listening to it.
+So the main issue is: **your slicer is fine, but the Top Readers measures are hardcoded by channel. Add `KEEPFILTERS` so the slicer selection is respected.**
