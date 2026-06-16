@@ -1,131 +1,91 @@
-For **Power BI Top Documents - Last 30 Days**, create the same three measures as the 7-day version, but change the window to **30 days**.
+Yes — for **Last 30 Days from the present/current date**, use `TODAY()` in Power BI instead of using `MaxDate` from the data.
 
-Use these in `cib_tbl_readership`.
+This will answer:
 
-### 1. Email_Open Last 30 Days
+> Do we have any readership records in the last 30 days from today?
+
+## Power BI measures using present date
+
+### Email_Open Last 30 Days from Today
 
 ```DAX
-Email_Open Last 30 Days =
-VAR MaxDate =
-    CALCULATE(
-        MAX(cib_tbl_readership[ReadDateTime]),
-        ALL(cib_tbl_readership)
-    )
-RETURN
+Email_Open Last 30 Days Today =
 CALCULATE(
     COUNTROWS(cib_tbl_readership),
-    cib_tbl_readership[ReadDateTime] >= MaxDate - 30,
-    cib_tbl_readership[ReadDateTime] <= MaxDate,
+    cib_tbl_readership[ReadDateTime] >= TODAY() - 30,
+    cib_tbl_readership[ReadDateTime] <= TODAY(),
     cib_tbl_readership[Channel] = "Email (Open)"
 )
 ```
 
-### 2. Online Last 30 Days
+### Online Last 30 Days from Today
 
 ```DAX
-Online Last 30 Days =
-VAR MaxDate =
-    CALCULATE(
-        MAX(cib_tbl_readership[ReadDateTime]),
-        ALL(cib_tbl_readership)
-    )
-RETURN
+Online Last 30 Days Today =
 CALCULATE(
     COUNTROWS(cib_tbl_readership),
-    cib_tbl_readership[ReadDateTime] >= MaxDate - 30,
-    cib_tbl_readership[ReadDateTime] <= MaxDate,
+    cib_tbl_readership[ReadDateTime] >= TODAY() - 30,
+    cib_tbl_readership[ReadDateTime] <= TODAY(),
     cib_tbl_readership[Channel] = "Bloomberg"
 )
 ```
 
-### 3. Grand Total Last 30 Days
-
-Use this to match the original logic:
+### Grand Total Last 30 Days from Today
 
 ```DAX
-Grand Total Last 30 Days =
-[Email_Open Last 30 Days] + [Online Last 30 Days]
+Grand Total Last 30 Days Today =
+[Email_Open Last 30 Days Today] + [Online Last 30 Days Today]
 ```
 
-Do **not** include Email Click in this Grand Total if you want it to match the original visual.
-
----
-
-## Visual setup
-
-Create a **Table visual**.
-
-Add these fields:
+Use these in the table visual:
 
 ```text
-cib_tbl_dim_doc[Title]
-Email_Open Last 30 Days
-Online Last 30 Days
-Grand Total Last 30 Days
+Title
+Email_Open Last 30 Days Today
+Online Last 30 Days Today
+Grand Total Last 30 Days Today
 ```
 
-Rename columns for this visual:
+If the table becomes blank or shows 0, that means your sample data does **not** have records in the last 30 calendar days from today.
 
-```text
-Email_Open Last 30 Days → Email_Open
-Online Last 30 Days → Online
-Grand Total Last 30 Days → Grand_Total
+## Databricks SQL check
+
+Run this first to see your date range:
+
+```sql
+SELECT
+  MIN(ReadDateTime) AS min_read_datetime,
+  MAX(ReadDateTime) AS max_read_datetime,
+  COUNT(*) AS total_rows
+FROM `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.cib_tbl_readership;
 ```
 
-Title:
+Then check last 30 days from current date:
 
-```text
-Top Documents - Last 30 Days
+```sql
+SELECT
+  COUNT(*) AS rows_last_30_days_from_today
+FROM `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.cib_tbl_readership
+WHERE ReadDateTime >= current_date() - INTERVAL 30 DAYS
+  AND ReadDateTime <= current_date();
 ```
 
-Sort by:
+And for Top Documents:
 
-```text
-Grand Total Last 30 Days descending
+```sql
+SELECT
+    d.Title,
+    SUM(CASE WHEN r.Channel = 'Email (Open)' THEN 1 ELSE 0 END) AS Email_Open,
+    SUM(CASE WHEN r.Channel = 'Bloomberg' THEN 1 ELSE 0 END) AS Online,
+    SUM(CASE WHEN r.Channel IN ('Email (Open)', 'Bloomberg') THEN 1 ELSE 0 END) AS Grand_Total
+FROM `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.cib_tbl_readership r
+JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.cib_tbl_dim_doc d
+    ON r.DocID = d.DocID
+WHERE r.ReadDateTime >= current_date() - INTERVAL 30 DAYS
+  AND r.ReadDateTime <= current_date()
+GROUP BY d.Title
+HAVING Grand_Total > 0
+ORDER BY Grand_Total DESC, Email_Open DESC, Online DESC;
 ```
 
----
-
-## Top N filter
-
-In **Filters on this visual**:
-
-1. Open `Title`.
-    
-2. Set **Filter type** to:
-    
-
-```text
-Top N
-```
-
-3. Show items:
-    
-
-```text
-Top 25
-```
-
-or whatever count the original shows.
-
-4. By value:
-    
-
-```text
-Grand Total Last 30 Days
-```
-
-5. Click **Apply filter**.
-    
-
----
-
-## Important
-
-If you want the same documents/counts as the original, first validate this against Databricks using the same 30-day logic. Then your Power BI visual should match:
-
-```text
-Email_Open = Channel Email (Open)
-Online = Channel Bloomberg
-Grand_Total = Email_Open + Online
-```
+If this returns no rows, use the **MaxDate-based** logic for testing/demo data. That means the data is historical and not within the real current 30-day window.
