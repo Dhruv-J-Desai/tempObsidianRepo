@@ -1,107 +1,61 @@
-The **Channel slicer is not affecting Top Readers** because your Top Readers table is using **separate hardcoded channel measures** like:
+Yes, if you **do not want Contact Owner** and you are using a **simple Table**, then the correct grain should be:
 
-```DAX
-Online Last 30 Days =
-CALCULATE(
-    COUNTROWS(cib_tbl_readership),
-    cib_tbl_readership[Channel] = "Bloomberg"
-)
+```text
+Account + Reader Name + Title
 ```
 
-and:
+Right now it is repeating because **Account is not correctly tied to the actual readership event**. It is showing the same reader/title against many accounts.
 
-```DAX
-Email Open Last 30 Days =
-CALCULATE(
-    COUNTROWS(cib_tbl_readership),
-    cib_tbl_readership[Channel] = "Email (Open)"
-)
+## What you should use
+
+For Top Readers table, use account based on the `AccountID` in `cib_tbl_readership`.
+
+Your relationship should be:
+
+```text
+cib_lookup_accountpropername_clienttype[AccountID]
+1 → *
+cib_tbl_readership[AccountID]
 ```
 
-Those measures force their own channel filter, so the slicer selection can get ignored/overridden.
+Then in the table, use:
 
-## Fix option 1: Use `KEEPFILTERS`
-
-Update your channel measures like this.
-
-### Online Last 30 Days
-
-```DAX
-Online Last 30 Days =
-VAR MaxDate =
-    CALCULATE(
-        MAX(cib_tbl_readership[ReadDateTime]),
-        ALL(cib_tbl_readership)
-    )
-RETURN
-CALCULATE(
-    COUNTROWS(cib_tbl_readership),
-    cib_tbl_readership[ReadDateTime] >= MaxDate - 30,
-    cib_tbl_readership[ReadDateTime] <= MaxDate,
-    KEEPFILTERS(cib_tbl_readership[Channel] = "Bloomberg")
-)
+```text
+Account:     cib_lookup_accountpropername_clienttype[AccountProperName]
+Reader Name: cib_tbl_dim_reader[ReaderName]
+Title:       cib_tbl_dim_doc[Title]
+Measures:    Online / Email Click / Email Open / Grand Total
 ```
 
-### Email Click Last 30 Days
-
-```DAX
-Email Click Last 30 Days =
-VAR MaxDate =
-    CALCULATE(
-        MAX(cib_tbl_readership[ReadDateTime]),
-        ALL(cib_tbl_readership)
-    )
-RETURN
-CALCULATE(
-    COUNTROWS(cib_tbl_readership),
-    cib_tbl_readership[ReadDateTime] >= MaxDate - 30,
-    cib_tbl_readership[ReadDateTime] <= MaxDate,
-    KEEPFILTERS(cib_tbl_readership[Channel] = "Email (Click)")
-)
-```
-
-### Email Open Last 30 Days
-
-```DAX
-Email Open Last 30 Days =
-VAR MaxDate =
-    CALCULATE(
-        MAX(cib_tbl_readership[ReadDateTime]),
-        ALL(cib_tbl_readership)
-    )
-RETURN
-CALCULATE(
-    COUNTROWS(cib_tbl_readership),
-    cib_tbl_readership[ReadDateTime] >= MaxDate - 30,
-    cib_tbl_readership[ReadDateTime] <= MaxDate,
-    KEEPFILTERS(cib_tbl_readership[Channel] = "Email (Open)")
-)
-```
-
-`KEEPFILTERS` makes the measure respect the slicer instead of overriding it.
+Do **not** use `cib_tbl_bmcontacts[Account]` for this version if you do not want Contact Owner, because `BMContacts` can have multiple account mappings for the same reader.
 
 ---
 
-## Fix option 2: Check Edit interactions
+## Table visual setup
 
-Also confirm the slicer is allowed to filter Top Readers:
+Use a normal **Table** visual with:
 
-1. Click the **Filter by Channel** slicer.
-    
-2. Go to top ribbon **Format**.
-    
-3. Click **Edit interactions**.
-    
-4. On the **Top Readers** visual, make sure the **filter icon** is selected.
-    
-5. Turn off **Edit interactions**.
-    
+```text
+cib_lookup_accountpropername_clienttype[AccountProperName]
+cib_tbl_dim_reader[ReaderName]
+cib_tbl_dim_doc[Title]
+Online Last 30 Days
+Email Click Last 30 Days
+Email Open Last 30 Days
+Grand Total Last 30 Days
+```
+
+Rename `AccountProperName` to:
+
+```text
+Account
+```
 
 ---
 
-## Add a visual filter to hide blank rows
+## Add a filter to remove fake/repeated rows
 
-After using `KEEPFILTERS`, some rows may still appear blank. Create this measure:
+Create this measure:
 
 ```DAX
 Reader Activity Total Last 30 Days =
@@ -110,14 +64,46 @@ Reader Activity Total Last 30 Days =
 + [Email Open Last 30 Days]
 ```
 
-Then add it to **Filters on this visual** for Top Readers:
+Then select the Top Readers table and add this to **Filters on this visual**:
 
 ```text
 Reader Activity Total Last 30 Days is greater than 0
 ```
 
-That will remove rows that do not match the selected channel.
+This is important. It removes account/reader/title combinations that do not actually have readership activity.
 
 ---
 
-So the main issue is: **your slicer is fine, but the Top Readers measures are hardcoded by channel. Add `KEEPFILTERS` so the slicer selection is respected.**
+## Why your current table repeats
+
+This row:
+
+```text
+Elena Volkov | Chart Logic: Equity Risk Premium vs Credit
+```
+
+is being shown for many accounts because Power BI is not using the account from the same event grain as `cib_tbl_readership`.
+
+The actual event grain is closer to:
+
+```text
+Readership row = ReaderID + DocID + AccountID + Channel + ReadDateTime
+```
+
+So the Account should come through `Readership.AccountID`, not from a loose contact/account mapping.
+
+---
+
+## Quick check
+
+Go to **Model view** and confirm these active relationships:
+
+```text
+cib_tbl_dim_reader[ReaderID] 1 → * cib_tbl_readership[ReaderID]
+
+cib_tbl_dim_doc[DocID] 1 → * cib_tbl_readership[DocID]
+
+cib_lookup_accountpropername_clienttype[AccountID] 1 → * cib_tbl_readership[AccountID]
+```
+
+Once those are active, the simple table should stop repeating the same reader/title across unrelated accounts.
