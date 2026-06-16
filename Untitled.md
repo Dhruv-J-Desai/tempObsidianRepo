@@ -1,45 +1,17 @@
-Yes, exactly.
+Yes — you are right. If the original visual has **Email Open**, **Online**, and also uses **Email Click / Link**, then we should add **Email_Click** as a separate column or include it in the total depending on the original definition.
 
-For **Top Document - Last 7 Days**, each row should represent **one document**, and the columns should be **column-level totals for that document**.
-
-So for every `Title`, you should calculate:
+Since your actual `Channel` values are:
 
 ```text
-Email_Open count for that document
-Online count for that document
-Grand_Total for that document
+Bloomberg
+Email (Click)
+Email (Open)
 ```
 
-Example:
-
-```text
-Title                                      Email_Open   Online   Grand_Total
-US Leveraged Finance: Covenant Trends     9            5        14
-```
-
-That means:
-
-```text
-For this specific document:
-Email_Open = 9
-Online = 5
-Grand_Total = 9 + 5 = 14
-```
-
-So yes — the total is **per document row**, not just one overall total at the bottom.
-
----
-
-## Important correction for your Power BI version
-
-Right now, if your visual shows many rows with `1`, it means the measure is counting each readership row individually, but the grouping/ranking may not be matching the original.
-
-For the first visual, use these measures:
-
-### Email_Open per document
+Create this missing measure:
 
 ```DAX
-Email_Open Last 7 Days =
+Email_Click Last 7 Days =
 VAR MaxDate =
     CALCULATE(
         MAX(cib_tbl_readership[ReadDateTime]),
@@ -50,51 +22,59 @@ CALCULATE(
     COUNTROWS(cib_tbl_readership),
     cib_tbl_readership[ReadDateTime] >= MaxDate - 7,
     cib_tbl_readership[ReadDateTime] <= MaxDate,
-    cib_tbl_readership[Channel] = "Email (Open)"
+    cib_tbl_readership[Channel] = "Email (Click)"
 )
 ```
 
-### Online per document
+Then your first visual should probably be:
 
-```DAX
-Online Last 7 Days =
-VAR MaxDate =
-    CALCULATE(
-        MAX(cib_tbl_readership[ReadDateTime]),
-        ALL(cib_tbl_readership)
-    )
-RETURN
-CALCULATE(
-    COUNTROWS(cib_tbl_readership),
-    cib_tbl_readership[ReadDateTime] >= MaxDate - 7,
-    cib_tbl_readership[ReadDateTime] <= MaxDate,
-    cib_tbl_readership[Channel] = "Bloomberg"
-)
+```text
+Title
+Email_Click Last 7 Days
+Email_Open Last 7 Days
+Online Last 7 Days
+Grand Total Last 7 Days
 ```
 
-### Grand Total per document
+Rename columns like:
 
-Use this if original dashboard total is only Email_Open + Online:
+```text
+Email_Click → Email_Link
+Email_Open  → Email_Open
+Online      → Online
+Grand Total → Grand_Total
+```
+
+Now update Grand Total depending on what the source dashboard expects.
+
+### Option A: Grand Total includes all 3 channels
+
+This is usually the safer definition:
 
 ```DAX
 Grand Total Last 7 Days =
-[Email_Open Last 7 Days] + [Online Last 7 Days]
+[Email_Click Last 7 Days]
++ [Email_Open Last 7 Days]
++ [Online Last 7 Days]
 ```
 
-This is probably the better match to your screenshot because:
+### Option B: Grand Total only includes Email Open + Online
 
-```text
-9 + 5 = 14
-8 + 2 = 10
+Use this only if the original screenshot clearly excludes Email Click:
+
+```DAX
+Grand Total Last 7 Days =
+[Email_Open Last 7 Days]
++ [Online Last 7 Days]
 ```
 
----
+For your current data, because `Email (Click)` exists as a channel, I would include it unless the original report intentionally separates link clicks from total readership.
 
-## Visual should be
+So final setup:
 
 ```text
-Rows/Columns:
-Title from cib_tbl_dim_doc
+Title
+Email_Click Last 7 Days
 Email_Open Last 7 Days
 Online Last 7 Days
 Grand Total Last 7 Days
@@ -106,12 +86,8 @@ Sort by:
 Grand Total Last 7 Days descending
 ```
 
-Filter:
+Top N filter:
 
 ```text
-Title Top N by Grand Total Last 7 Days
+Title → Top N → Top 25 by Grand Total Last 7 Days
 ```
-
-So yes, your understanding is correct:
-
-> We need document-level totals, where each measure is calculated per document title using the `DocID` relationship between `cib_tbl_dim_doc` and `cib_tbl_readership`.
