@@ -1,107 +1,106 @@
-Yes — use separate measures for **Email Open** and **Online/Bloomberg**, both based on `Max(ReadDateTime)`.
+Yes, check it directly in Databricks first. Start with the same logic Strategy is using.
 
-### Email Open - Last 7 Days
+## 1. Check the max read date
 
-```DAX
-Email Open Last 7 Days =
-VAR MaxReadDate =
-    CALCULATE(
-        MAX(cib_tbl_readership[ReadDateTime]),
-        ALL(cib_tbl_readership)
-    )
-RETURN
-CALCULATE(
-    COUNTROWS(cib_tbl_readership),
-    cib_tbl_readership[ReadDateTime] >= MaxReadDate - 7,
-    cib_tbl_readership[ReadDateTime] <= MaxReadDate,
-    cib_tbl_readership[Channel] = "Email (Open)"
-)
+```sql
+SELECT
+  MAX(ReadDateTime) AS Max_Read,
+  dateadd(MAX(ReadDateTime), -7) AS Max_Read_7,
+  dateadd(MAX(ReadDateTime), -30) AS Max_Read_30
+FROM `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.cib_tbl_readership;
 ```
 
-### Online / Bloomberg - Last 7 Days
+This tells you the exact date range Strategy is using.
 
-```DAX
-Online Last 7 Days =
-VAR MaxReadDate =
-    CALCULATE(
-        MAX(cib_tbl_readership[ReadDateTime]),
-        ALL(cib_tbl_readership)
-    )
-RETURN
-CALCULATE(
-    COUNTROWS(cib_tbl_readership),
-    cib_tbl_readership[ReadDateTime] >= MaxReadDate - 7,
-    cib_tbl_readership[ReadDateTime] <= MaxReadDate,
-    cib_tbl_readership[Channel] = "Bloomberg"
+---
+
+## 2. Check Top Documents - Last 7 Days
+
+```sql
+WITH custom_cib_tbl_readership AS (
+  SELECT
+    a.*,
+    dateadd(MAX(a.ReadDateTime) OVER (), -7) AS Max_Read_7,
+    dateadd(MAX(a.ReadDateTime) OVER (), -30) AS Max_Read_30,
+    MAX(a.ReadDateTime) OVER () AS Max_Read,
+    CASE
+      WHEN a.ReadDateTime BETWEEN dateadd(MAX(a.ReadDateTime) OVER (), -7)
+                              AND MAX(a.ReadDateTime) OVER ()
+      THEN 1 ELSE 0
+    END AS read_7,
+    CASE
+      WHEN a.ReadDateTime BETWEEN dateadd(MAX(a.ReadDateTime) OVER (), -30)
+                              AND MAX(a.ReadDateTime) OVER ()
+      THEN 1 ELSE 0
+    END AS read_30
+  FROM `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.cib_tbl_readership a
 )
-```
-
-### Grand Total - Last 7 Days
-
-To match the Strategy visual:
-
-```DAX
-Grand Total Last 7 Days =
-[Email Open Last 7 Days] + [Online Last 7 Days]
+SELECT
+  d.Title,
+  SUM(CASE WHEN r.Channel = 'Email (Open)' THEN 1 ELSE 0 END) AS Email_Open,
+  SUM(CASE WHEN r.Channel = 'Bloomberg' THEN 1 ELSE 0 END) AS Online,
+  SUM(CASE WHEN r.Channel IN ('Email (Open)', 'Bloomberg') THEN 1 ELSE 0 END) AS Grand_Total
+FROM custom_cib_tbl_readership r
+JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.cib_tbl_dim_doc d
+  ON r.DocID = d.DocID
+WHERE r.read_7 = 1
+GROUP BY d.Title
+HAVING Grand_Total > 0
+ORDER BY Grand_Total DESC, Email_Open DESC, Online DESC, d.Title
+LIMIT 50;
 ```
 
 ---
 
-### Email Open - Last 30 Days
+## 3. Check Top Documents - Last 30 Days
 
-```DAX
-Email Open Last 30 Days =
-VAR MaxReadDate =
-    CALCULATE(
-        MAX(cib_tbl_readership[ReadDateTime]),
-        ALL(cib_tbl_readership)
-    )
-RETURN
-CALCULATE(
-    COUNTROWS(cib_tbl_readership),
-    cib_tbl_readership[ReadDateTime] >= MaxReadDate - 30,
-    cib_tbl_readership[ReadDateTime] <= MaxReadDate,
-    cib_tbl_readership[Channel] = "Email (Open)"
+```sql
+WITH custom_cib_tbl_readership AS (
+  SELECT
+    a.*,
+    dateadd(MAX(a.ReadDateTime) OVER (), -7) AS Max_Read_7,
+    dateadd(MAX(a.ReadDateTime) OVER (), -30) AS Max_Read_30,
+    MAX(a.ReadDateTime) OVER () AS Max_Read,
+    CASE
+      WHEN a.ReadDateTime BETWEEN dateadd(MAX(a.ReadDateTime) OVER (), -7)
+                              AND MAX(a.ReadDateTime) OVER ()
+      THEN 1 ELSE 0
+    END AS read_7,
+    CASE
+      WHEN a.ReadDateTime BETWEEN dateadd(MAX(a.ReadDateTime) OVER (), -30)
+                              AND MAX(a.ReadDateTime) OVER ()
+      THEN 1 ELSE 0
+    END AS read_30
+  FROM `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.cib_tbl_readership a
 )
+SELECT
+  d.Title,
+  SUM(CASE WHEN r.Channel = 'Email (Open)' THEN 1 ELSE 0 END) AS Email_Open,
+  SUM(CASE WHEN r.Channel = 'Bloomberg' THEN 1 ELSE 0 END) AS Online,
+  SUM(CASE WHEN r.Channel IN ('Email (Open)', 'Bloomberg') THEN 1 ELSE 0 END) AS Grand_Total
+FROM custom_cib_tbl_readership r
+JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.cib_tbl_dim_doc d
+  ON r.DocID = d.DocID
+WHERE r.read_30 = 1
+GROUP BY d.Title
+HAVING Grand_Total > 0
+ORDER BY Grand_Total DESC, Email_Open DESC, Online DESC, d.Title
+LIMIT 50;
 ```
 
-### Online / Bloomberg - Last 30 Days
+---
 
-```DAX
-Online Last 30 Days =
-VAR MaxReadDate =
-    CALCULATE(
-        MAX(cib_tbl_readership[ReadDateTime]),
-        ALL(cib_tbl_readership)
-    )
-RETURN
-CALCULATE(
-    COUNTROWS(cib_tbl_readership),
-    cib_tbl_readership[ReadDateTime] >= MaxReadDate - 30,
-    cib_tbl_readership[ReadDateTime] <= MaxReadDate,
-    cib_tbl_readership[Channel] = "Bloomberg"
-)
+## 4. If Power BI still differs, check channel values
+
+Run this:
+
+```sql
+SELECT
+  Channel,
+  COUNT(*) AS row_count
+FROM `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.raw.cib_tbl_readership
+GROUP BY Channel
+ORDER BY row_count DESC;
 ```
 
-### Grand Total - Last 30 Days
-
-```DAX
-Grand Total Last 30 Days =
-[Email Open Last 30 Days] + [Online Last 30 Days]
-```
-
-For the message, you can say:
-
-Hi Nilanka,
-
-I will update the Power BI measures for the Strategy-matching logic using `Max(ReadDateTime)` as the reference date.
-
-Specifically:
-
-Email Open Last 7 / 30 Days = count of rows where `Channel = Email (Open)` within `Max(ReadDateTime) - 7 / 30 days`
-
-Online Last 7 / 30 Days = count of rows where `Channel = Bloomberg` within `Max(ReadDateTime) - 7 / 30 days`
-
-Grand Total = Email Open + Online
-
-This should match the way Strategy is calculating the Last 7 Days and Last 30 Days visuals from the custom Free-form SQL table.
+If Databricks shows `Bloomberg & Library` instead of `Bloomberg`, then your Power BI DAX should use that exact value.
