@@ -1,172 +1,189 @@
-Yes, your Power BI setup looks correct now:
+Yes — based on your Databricks result, **Power BI is not matching the SQL output**.
+
+Your Databricks SQL result starts with:
+
+```text
+Acme Manufacturing
+Adage Capital
+Addenda Capital
+Aimia
+...
+```
+
+But Power BI starts with:
+
+```text
+1832 Asset Management
+Adam Donaldson
+...
+```
+
+So Power BI is likely using a different filter context or a different measure logic.
+
+The most likely issue is this:
+
+> Your Power BI Top Readers matrix is showing rows even when they do not match the same `Last 30 Days + Channel + Grand Total > 0` logic used in Databricks.
+
+## Fix 1: Add a visual filter to remove non-matching rows
+
+Create this measure in Power BI:
+
+```DAX
+Reader Activity Total Last 30 Days =
+[Online Last 30 Days] + [Email Click Last 30 Days] + [Email Open Last 30 Days]
+```
+
+Then select your **Top Readers** matrix and add this measure to:
+
+```text
+Filters on this visual
+```
+
+Set it to:
+
+```text
+is greater than 0
+```
+
+This matches your SQL condition:
+
+```sql
+WHERE Grand_Total_Last_30_Days > 0
+```
+
+## Fix 2: Make sure your Top Readers measures are Last 30 Days measures
+
+For Top Readers, use these measures:
+
+```DAX
+Email Open Last 30 Days =
+VAR MaxReadDate =
+    CALCULATE(
+        MAX(cib_tbl_readership[ReadDateTime]),
+        ALL(cib_tbl_readership)
+    )
+RETURN
+CALCULATE(
+    COUNTROWS(cib_tbl_readership),
+    cib_tbl_readership[ReadDateTime] >= MaxReadDate - 30,
+    cib_tbl_readership[ReadDateTime] <= MaxReadDate,
+    cib_tbl_readership[Channel] = "Email (Open)"
+)
+```
+
+```DAX
+Email Click Last 30 Days =
+VAR MaxReadDate =
+    CALCULATE(
+        MAX(cib_tbl_readership[ReadDateTime]),
+        ALL(cib_tbl_readership)
+    )
+RETURN
+CALCULATE(
+    COUNTROWS(cib_tbl_readership),
+    cib_tbl_readership[ReadDateTime] >= MaxReadDate - 30,
+    cib_tbl_readership[ReadDateTime] <= MaxReadDate,
+    cib_tbl_readership[Channel] = "Email (Click)"
+)
+```
+
+```DAX
+Online Last 30 Days =
+VAR MaxReadDate =
+    CALCULATE(
+        MAX(cib_tbl_readership[ReadDateTime]),
+        ALL(cib_tbl_readership)
+    )
+RETURN
+CALCULATE(
+    COUNTROWS(cib_tbl_readership),
+    cib_tbl_readership[ReadDateTime] >= MaxReadDate - 30,
+    cib_tbl_readership[ReadDateTime] <= MaxReadDate,
+    cib_tbl_readership[Channel] = "Bloomberg"
+)
+```
+
+Then your matrix should use:
 
 ```text
 Rows:
-Account
-Reader Name
+AccountProperName
+ReaderName
 Title
 
 Values:
-Bloomberg & Library
-Email Link
-Email Open
+Online Last 30 Days
+Email Click Last 30 Days
+Email Open Last 30 Days
 ```
 
-So if you still see different rows than Strategy, then the difference is most likely due to one of these:
+Do not use all-time measures in this visual.
 
-1. **Power BI is sorting Account alphabetically**, so `1832 Asset Management` appears first.
-    
-2. **Strategy and Power BI may not have the exact same filters applied**.
-    
-3. **The account field may be different** between tools.
-    
-4. **Power BI relationship path may be different**, especially between `account`, `reader`, `title`, and `readership`.
-    
-5. **Strategy may be using a custom/freeform SQL table**, while Power BI is using raw tables.
-    
+## Fix 3: Use the same account field as SQL
 
-Use this Databricks SQL to validate the **Top Readers** output.
+In SQL you are using:
 
 ```sql
-WITH max_read AS (
-    SELECT
-        MAX(ReadDateTime) AS max_read_datetime
-    FROM `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.`raw`.`cib_tbl_readership`
-),
-
-last_30 AS (
-    SELECT
-        r.*
-    FROM `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.`raw`.`cib_tbl_readership` r
-    CROSS JOIN max_read m
-    WHERE r.ReadDateTime BETWEEN m.max_read_datetime - INTERVAL 30 DAYS
-                             AND m.max_read_datetime
-),
-
-top_readers AS (
-    SELECT
-        a.AccountProperName AS Account_Name,
-        rd.ReaderName AS Reader_Name,
-        d.Title AS Document_Title,
-
-        SUM(
-            CASE 
-                WHEN r.Channel = 'Bloomberg' 
-                THEN 1 ELSE 0 
-            END
-        ) AS Bloomberg_Library,
-
-        SUM(
-            CASE 
-                WHEN r.Channel = 'Email (Click)' 
-                THEN 1 ELSE 0 
-            END
-        ) AS Email_Link,
-
-        SUM(
-            CASE 
-                WHEN r.Channel = 'Email (Open)' 
-                THEN 1 ELSE 0 
-            END
-        ) AS Email_Open,
-
-        SUM(
-            CASE 
-                WHEN r.Channel IN ('Bloomberg', 'Email (Click)', 'Email (Open)') 
-                THEN 1 ELSE 0 
-            END
-        ) AS Grand_Total_Last_30_Days
-
-    FROM last_30 r
-
-    LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.`raw`.`cib_tbl_dim_doc` d
-        ON r.DocID = d.DocID
-
-    LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.`raw`.`cib_tbl_dim_reader` rd
-        ON r.ReaderID = rd.ReaderID
-
-    LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.`raw`.`cib_lookup_accountpropername_clienttype` a
-        ON r.AccountID = a.AccountID
-
-    GROUP BY
-        a.AccountProperName,
-        rd.ReaderName,
-        d.Title
-)
-
-SELECT
-    Account_Name,
-    Reader_Name,
-    Document_Title,
-    Bloomberg_Library,
-    Email_Link,
-    Email_Open,
-    Grand_Total_Last_30_Days
-FROM top_readers
-WHERE Grand_Total_Last_30_Days > 0
-ORDER BY
-    Account_Name,
-    Reader_Name,
-    Document_Title;
+a.AccountProperName AS Account_Name
 ```
 
-If your actual account lookup table name is different, replace this part:
-
-```sql
-`d4001-centralus-tdvip-tdsbi_mstrt_catalog`.`raw`.`cib_lookup_accountpropername_clienttype`
-```
-
-with the table you are using in Power BI.
-
-Also, based on your Power BI model screenshot, your channel field values may be:
+So in Power BI, use the same equivalent field:
 
 ```text
-Bloomberg
-Email (Click)
-Email (Open)
+cib_lookup_accountpropername_clienttype[AccountProperName]
 ```
 
-But your column label says:
+Do not use:
 
 ```text
-Bloomberg & Library
-Email (Link)
-Email (Open)
+cib_tbl_readership[AccountID]
 ```
 
-So if the source actually uses different names, first validate with:
+or raw account fields if Strategy/SQL is using the lookup proper name.
 
-```sql
-SELECT
-    Channel,
-    COUNT(*) AS row_count
-FROM `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.`raw`.`cib_tbl_readership`
-GROUP BY Channel
-ORDER BY row_count DESC;
+## Fix 4: Turn off “Show items with no data”
+
+In the Matrix:
+
+1. In the **Rows** bucket, click dropdown for `Account`.
+    
+2. Make sure **Show items with no data** is unchecked.
+    
+3. Do the same for:
+    
+    - `Reader Name`
+        
+    - `Title`
+        
+
+## Final check
+
+Your Power BI Top Readers should match Databricks when all of these are true:
+
+```text
+Rows:
+AccountProperName
+ReaderName
+Title
+
+Values:
+Online Last 30 Days
+Email Click Last 30 Days
+Email Open Last 30 Days
+
+Visual filter:
+Reader Activity Total Last 30 Days > 0
+
+Sort:
+AccountProperName ascending
+ReaderName ascending
+Title ascending
 ```
 
-To check specifically why `1832 Asset Management` is appearing first:
+Right now, the first thing I would fix is the visual filter:
 
-```sql
-WITH max_read AS (
-    SELECT
-        MAX(ReadDateTime) AS max_read_datetime
-    FROM `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.`raw`.`cib_tbl_readership`
-)
-
-SELECT
-    a.AccountProperName AS Account_Name,
-    COUNT(*) AS Total_Reads_Last_30_Days
-FROM `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.`raw`.`cib_tbl_readership` r
-CROSS JOIN max_read m
-LEFT JOIN `d4001-centralus-tdvip-tdsbi_mstrt_catalog`.`raw`.`cib_lookup_accountpropername_clienttype` a
-    ON r.AccountID = a.AccountID
-WHERE r.ReadDateTime BETWEEN m.max_read_datetime - INTERVAL 30 DAYS
-                         AND m.max_read_datetime
-GROUP BY
-    a.AccountProperName
-ORDER BY
-    Account_Name;
+```text
+Reader Activity Total Last 30 Days > 0
 ```
 
-If this returns `1832 Asset Management`, then Power BI is correct to show it. Strategy is probably either sorted differently or has a filter excluding it.
+That should remove rows like `1832 Asset Management` if they are not present in the Databricks result.
