@@ -1,3 +1,4 @@
+```sql
 WITH max_read AS (
     SELECT
         MAX(ReadDateTime) AS max_read_datetime
@@ -62,3 +63,4 @@ ORDER BY
     Email_Open DESC,
     Document_Title
 LIMIT 10;
+```
